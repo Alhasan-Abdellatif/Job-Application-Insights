@@ -24,6 +24,6 @@ repos:
     rev: v1.10.0
     hooks:
       - id: mypy
-        additional_dependencies: [pydantic]
+        additional_dependencies: [pydantic>=2.7, pandas-stubs>=2.2]
         args: [--config-file=pyproject.toml]
         files: ^src/
