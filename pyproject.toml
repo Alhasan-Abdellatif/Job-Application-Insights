@@ -14,9 +14,11 @@ classifiers = [
 ]
 dependencies = [
     "langchain-text-splitters>=0.3",
+    "numpy>=1.26",
     "pandas>=3.0.3",
     "pydantic>=2.7",
     "python-dotenv>=1.0",
+    "sentence-transformers>=3.0",
     "tiktoken>=0.7",
 ]
 
@@ -83,7 +85,7 @@ disallow_untyped_defs = false
 [[tool.mypy.overrides]]
 # Third-party libs without bundled type stubs — Pydantic boundary types
 # handle correctness for downstream callers.
-module = ["tiktoken", "langchain_text_splitters"]
+module = ["tiktoken", "langchain_text_splitters", "sentence_transformers"]
 ignore_missing_imports = true
 
 # ─────────────────────────────── Pytest ──────────────────────────────
