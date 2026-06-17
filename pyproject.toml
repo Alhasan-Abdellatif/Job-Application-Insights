@@ -13,6 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
+    "anthropic>=0.40",
     "chromadb>=0.5",
     "langchain-text-splitters>=0.3",
     "numpy>=1.26",
