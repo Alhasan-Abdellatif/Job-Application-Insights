@@ -37,9 +37,12 @@ Prompt design (worth understanding before tweaking):
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from anthropic import Anthropic
+from google import genai
+from google.genai import types as genai_types
+from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
@@ -60,6 +63,12 @@ SYSTEM_PROMPT: str = (
 DEFAULT_ANTHROPIC_MODEL: str = "claude-haiku-4-5"
 """Cheapest Claude model — fine for dev. Swap to ``claude-sonnet-4-6`` for
 demo / final eval runs."""
+
+DEFAULT_OPENAI_MODEL: str = "gpt-4o-mini"
+"""Cheap modern OpenAI model. Swap to ``gpt-4o`` for higher quality."""
+
+DEFAULT_GEMINI_MODEL: str = "gemini-2.5-flash"
+"""Google's cheap fast tier. Swap to ``gemini-2.5-pro`` for higher quality."""
 
 DEFAULT_MAX_TOKENS: int = 1024
 """Upper bound on the answer length. RAG answers are usually short; 1024 is
@@ -167,6 +176,85 @@ class AnthropicClient:
         return str(text)
 
 
+class OpenAIClient:
+    """OpenAI-backed implementation of :class:`LLMClient`.
+
+    The OpenAI SDK reads ``OPENAI_API_KEY`` from the environment when
+    ``api_key`` is left ``None``.
+    """
+
+    def __init__(
+        self,
+        model: str = DEFAULT_OPENAI_MODEL,
+        *,
+        api_key: str | None = None,
+    ) -> None:
+        self.model = model
+        self._client = OpenAI(api_key=api_key)
+
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> str:
+        response = self._client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        # OpenAI's chat-completions API can theoretically return content=None
+        # when a function call was requested instead of text; we don't use
+        # tools here so this is defensive.
+        content = response.choices[0].message.content
+        return content or ""
+
+
+class GeminiClient:
+    """Google Gemini-backed implementation of :class:`LLMClient`.
+
+    The google-genai SDK reads ``GOOGLE_API_KEY`` (or ``GEMINI_API_KEY``)
+    from the environment when ``api_key`` is left ``None``.
+    """
+
+    def __init__(
+        self,
+        model: str = DEFAULT_GEMINI_MODEL,
+        *,
+        api_key: str | None = None,
+    ) -> None:
+        self.model = model
+        self._client = genai.Client(api_key=api_key)
+
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> str:
+        config = genai_types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=user,
+            config=config,
+        )
+        # google-genai exposes a `.text` convenience property that may be
+        # None if the model returned a tool call or was blocked by safety.
+        return response.text or ""
+
+
 class EchoClient:
     """Test / offline implementation — no network, no API key, deterministic.
 
@@ -192,6 +280,39 @@ class EchoClient:
         if not ids:
             return f"{self.prefix}: no sources found in prompt"
         return f"{self.prefix}: answer derived from {len(ids)} sources: " + ", ".join(ids)
+
+
+# ────────────────────────────── factory ──────────────────────────────
+
+PROVIDER_NAMES: tuple[str, ...] = ("anthropic", "openai", "gemini", "echo")
+"""Recognised provider names for :func:`make_llm_client`."""
+
+
+def make_llm_client(provider: str = "anthropic", **kwargs: Any) -> LLMClient:
+    """Construct an :class:`LLMClient` by provider name.
+
+    Parameters
+    ----------
+    provider
+        One of ``"anthropic"``, ``"openai"``, ``"gemini"``, ``"echo"``.
+    **kwargs
+        Forwarded to the chosen client's constructor — e.g. ``model``,
+        ``api_key`` for the API-backed clients, ``prefix`` for ``EchoClient``.
+
+    Raises
+    ------
+    ValueError
+        If ``provider`` is not one of the recognised names.
+    """
+    if provider == "anthropic":
+        return AnthropicClient(**kwargs)
+    if provider == "openai":
+        return OpenAIClient(**kwargs)
+    if provider == "gemini":
+        return GeminiClient(**kwargs)
+    if provider == "echo":
+        return EchoClient(**kwargs)
+    raise ValueError(f"unknown provider {provider!r}; expected one of {PROVIDER_NAMES}")
 
 
 # ────────────────────────────── public API ──────────────────────────────

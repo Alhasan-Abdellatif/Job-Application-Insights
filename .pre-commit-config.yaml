@@ -24,6 +24,12 @@ repos:
     rev: v1.10.0
     hooks:
       - id: mypy
-        additional_dependencies: [pydantic>=2.7, pandas-stubs>=2.2, anthropic>=0.40, numpy>=1.26]
+        additional_dependencies:
+          - pydantic>=2.7
+          - pandas-stubs>=2.2
+          - anthropic>=0.40
+          - openai>=1.50
+          - google-genai>=0.4
+          - numpy>=1.26
         args: [--config-file=pyproject.toml]
         files: ^src/

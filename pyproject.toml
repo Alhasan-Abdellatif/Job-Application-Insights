@@ -15,8 +15,10 @@ classifiers = [
 dependencies = [
     "anthropic>=0.40",
     "chromadb>=0.5",
+    "google-genai>=0.4",
     "langchain-text-splitters>=0.3",
     "numpy>=1.26",
+    "openai>=1.50",
     "pandas>=3.0.3",
     "pydantic>=2.7",
     "python-dotenv>=1.0",
@@ -87,7 +89,7 @@ disallow_untyped_defs = false
 [[tool.mypy.overrides]]
 # Third-party libs without bundled type stubs — Pydantic boundary types
 # handle correctness for downstream callers.
-module = ["tiktoken", "langchain_text_splitters", "sentence_transformers", "chromadb"]
+module = ["tiktoken", "langchain_text_splitters", "sentence_transformers", "chromadb", "google", "google.genai", "google.genai.types"]
 ignore_missing_imports = true
 
 # ─────────────────────────────── Pytest ──────────────────────────────

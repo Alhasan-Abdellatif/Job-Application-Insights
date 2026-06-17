@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 from job_application_insights.generate import (
     DEFAULT_ANTHROPIC_MODEL,
+    PROVIDER_NAMES,
     SYSTEM_PROMPT,
     Answer,
+    AnthropicClient,
     Citation,
     EchoClient,
+    GeminiClient,
+    OpenAIClient,
     format_prompt,
     generate_answer,
+    make_llm_client,
 )
 from job_application_insights.ingest.chunk import Chunk
 from job_application_insights.retrieval.vector_store import RetrievalResult
@@ -184,3 +191,118 @@ def test_answer_rejects_empty_query():
 
 def test_default_anthropic_model_constant():
     assert DEFAULT_ANTHROPIC_MODEL.startswith("claude-")
+
+
+# ───── make_llm_client factory ─────
+
+
+def test_make_llm_client_echo_does_not_require_api_key():
+    client = make_llm_client("echo")
+    assert isinstance(client, EchoClient)
+
+
+def test_make_llm_client_forwards_kwargs_to_echo():
+    client = make_llm_client("echo", prefix="STUB")
+    assert isinstance(client, EchoClient)
+    assert client.prefix == "STUB"
+
+
+def test_make_llm_client_anthropic_returns_anthropic_client(monkeypatch):
+    """Construction should not require a real API key when one is set in env."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+    client = make_llm_client("anthropic")
+    assert isinstance(client, AnthropicClient)
+
+
+def test_make_llm_client_openai_returns_openai_client(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test-not-real")
+    client = make_llm_client("openai")
+    assert isinstance(client, OpenAIClient)
+
+
+def test_make_llm_client_gemini_returns_gemini_client(monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-test-not-real")
+    client = make_llm_client("gemini")
+    assert isinstance(client, GeminiClient)
+
+
+def test_make_llm_client_rejects_unknown_provider():
+    with pytest.raises(ValueError, match="unknown provider"):
+        make_llm_client("not_a_real_provider")
+
+
+def test_provider_names_constant_matches_factory(monkeypatch):
+    """Sanity: every name in PROVIDER_NAMES should be a valid choice."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    expected_types = {
+        "anthropic": AnthropicClient,
+        "openai": OpenAIClient,
+        "gemini": GeminiClient,
+        "echo": EchoClient,
+    }
+    for provider in PROVIDER_NAMES:
+        client = make_llm_client(provider)
+        assert isinstance(client, expected_types[provider])
+
+
+# ───── new-provider response parsing (mocked, no network) ─────
+
+
+def test_openai_client_complete_parses_message_content():
+    fake_choice = MagicMock()
+    fake_choice.message = MagicMock(content="hello from OpenAI")
+    fake_response = MagicMock()
+    fake_response.choices = [fake_choice]
+
+    client = OpenAIClient.__new__(OpenAIClient)  # skip __init__ network bits
+    client.model = "gpt-test"
+    client._client = MagicMock()
+    client._client.chat.completions.create.return_value = fake_response
+
+    result = client.complete(system="s", user="u")
+    assert result == "hello from OpenAI"
+
+
+def test_openai_client_complete_handles_none_content():
+    """OpenAI can return content=None when a tool call was requested."""
+    fake_choice = MagicMock()
+    fake_choice.message = MagicMock(content=None)
+    fake_response = MagicMock()
+    fake_response.choices = [fake_choice]
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.model = "gpt-test"
+    client._client = MagicMock()
+    client._client.chat.completions.create.return_value = fake_response
+
+    result = client.complete(system="s", user="u")
+    assert result == ""
+
+
+def test_gemini_client_complete_parses_text_property():
+    fake_response = MagicMock()
+    fake_response.text = "hello from Gemini"
+
+    client = GeminiClient.__new__(GeminiClient)
+    client.model = "gemini-test"
+    client._client = MagicMock()
+    client._client.models.generate_content.return_value = fake_response
+
+    result = client.complete(system="s", user="u")
+    assert result == "hello from Gemini"
+
+
+def test_gemini_client_complete_handles_none_text():
+    """Gemini can return text=None when safety-blocked."""
+    fake_response = MagicMock()
+    fake_response.text = None
+
+    client = GeminiClient.__new__(GeminiClient)
+    client.model = "gemini-test"
+    client._client = MagicMock()
+    client._client.models.generate_content.return_value = fake_response
+
+    result = client.complete(system="s", user="u")
+    assert result == ""

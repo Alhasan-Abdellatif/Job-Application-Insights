@@ -43,6 +43,7 @@ data/embeddings/
 
 # ── Vector store ──────────────────────────────────────
 .chroma/
+data/chroma/
 qdrant_storage/
 
 # ── OS / IDE ──────────────────────────────────────────

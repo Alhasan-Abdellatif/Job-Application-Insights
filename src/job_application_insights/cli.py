@@ -18,10 +18,9 @@ from pathlib import Path
 
 from job_application_insights import __version__
 from job_application_insights.generate import (
-    AnthropicClient,
-    EchoClient,
-    LLMClient,
+    PROVIDER_NAMES,
     generate_answer,
+    make_llm_client,
 )
 from job_application_insights.ingest.chunk import chunk_documents
 from job_application_insights.ingest.embed import Embedder
@@ -56,7 +55,7 @@ def _ingest(csvs: list[Path], store_path: Path) -> int:
     return 0
 
 
-def _ask(query: str, store_path: Path, k: int, *, use_echo: bool) -> int:
+def _ask(query: str, store_path: Path, k: int, provider: str) -> int:
     """Embed the query → retrieve top-k → generate cited answer."""
     store = VectorStore(store_path)
     if store.n_chunks == 0:
@@ -70,13 +69,7 @@ def _ask(query: str, store_path: Path, k: int, *, use_echo: bool) -> int:
     query_vec = embedder.embed([query])[0]
     results = store.query(query_vec, k=k)
 
-    # if/else (not ternary) so mypy can narrow the LLMClient Protocol type;
-    # the ternary form has the conditional inferred as `object`.
-    client: LLMClient
-    if use_echo:  # noqa: SIM108
-        client = EchoClient()
-    else:
-        client = AnthropicClient()
+    client = make_llm_client(provider)
     answer = generate_answer(query, results, client)
 
     print(answer.text)
@@ -130,11 +123,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Number of chunks to retrieve (default {DEFAULT_K}).",
     )
     p_ask.add_argument(
-        "--echo",
-        action="store_true",
+        "--provider",
+        choices=PROVIDER_NAMES,
+        default="anthropic",
         help=(
-            "Use the EchoClient instead of Anthropic — no API call, no API key, "
-            "deterministic output. Useful for offline development."
+            "LLM provider to use. 'anthropic' (default), 'openai', 'gemini', or "
+            "'echo' (deterministic test double; no API call). Each non-echo "
+            "provider reads its own env var: ANTHROPIC_API_KEY / OPENAI_API_KEY "
+            "/ GOOGLE_API_KEY."
         ),
     )
 
@@ -153,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ingest":
         return _ingest(list(args.csvs), args.store)
     if args.command == "ask":
-        return _ask(args.query, args.store, args.k, use_echo=args.echo)
+        return _ask(args.query, args.store, args.k, args.provider)
 
     parser.print_help()
     return 0
