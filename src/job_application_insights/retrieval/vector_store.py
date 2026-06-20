@@ -53,6 +53,10 @@ DEFAULT_COLLECTION_NAME: str = "chunks"
 """Single collection name we use across the project. Multiple collections
 would be a Week 2+ concern (e.g. separate index per data source)."""
 
+_UPSERT_BATCH_SIZE: int = 5000
+"""Chroma rejects upserts larger than ~5,461 in one call. We batch under
+that limit so callers can pass whole corpora without thinking about it."""
+
 
 # ────────────────────────────── data model ──────────────────────────────
 
@@ -160,18 +164,23 @@ class VectorStore:
         """Insert or replace ``chunks`` with their ``embeddings``.
 
         Idempotent: re-upserting the same ``chunk_id`` replaces the existing
-        row. Empty input is a no-op.
+        row. Empty input is a no-op. Calls are internally batched so callers
+        can pass an arbitrarily large list — Chroma has a hard per-call
+        limit (~5,461 at time of writing) that we stay safely under.
         """
         if not chunks:
             return
         assert_aligned(chunks, embeddings)
 
-        self._collection.upsert(
-            ids=[c.chunk_id for c in chunks],
-            embeddings=embeddings.tolist(),
-            documents=[c.text for c in chunks],
-            metadatas=[_chunk_to_metadata(c) for c in chunks],
-        )
+        for start in range(0, len(chunks), _UPSERT_BATCH_SIZE):
+            end = start + _UPSERT_BATCH_SIZE
+            batch = chunks[start:end]
+            self._collection.upsert(
+                ids=[c.chunk_id for c in batch],
+                embeddings=embeddings[start:end].tolist(),
+                documents=[c.text for c in batch],
+                metadatas=[_chunk_to_metadata(c) for c in batch],
+            )
 
     def query(
         self,

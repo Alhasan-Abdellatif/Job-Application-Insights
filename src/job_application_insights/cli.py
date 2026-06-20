@@ -1,9 +1,10 @@
 """Command-line entry point.
 
-Two subcommands close the Week-1 RAG loop:
+Subcommands:
 
 * ``jai ingest <csv> [<csv> ...]`` — parse, chunk, embed, persist.
 * ``jai ask "<question>"`` — embed the query, retrieve, generate, print.
+* ``jai eval`` *(Week 2)* — score the retriever against the golden set.
 
 A persistent Chroma collection lives at ``--store`` (default
 ``./data/chroma``) and survives across runs, so you only ever pay the
@@ -17,6 +18,11 @@ import sys
 from pathlib import Path
 
 from job_application_insights import __version__
+from job_application_insights.evals.runner import (
+    evaluate_path,
+    format_report,
+    make_dense_retriever,
+)
 from job_application_insights.generate import (
     PROVIDER_NAMES,
     generate_answer,
@@ -28,6 +34,7 @@ from job_application_insights.ingest.parse import load_documents
 from job_application_insights.retrieval.vector_store import VectorStore
 
 DEFAULT_STORE_PATH = Path("./data/chroma")
+DEFAULT_GOLDEN_PATH = Path("./evals/golden_set.jsonl")
 DEFAULT_K = 8
 
 
@@ -77,6 +84,28 @@ def _ask(query: str, store_path: Path, k: int, provider: str) -> int:
     print("─── citations ───")
     for cit in answer.citations:
         print(f"  [{cit.chunk_id}]  sim={cit.score:.3f}  {cit.snippet[:80]}…")
+    return 0
+
+
+def _eval(store_path: Path, golden_path: Path, k: int) -> int:
+    """Score the dense-only retriever against the golden set."""
+    store = VectorStore(store_path)
+    if store.n_chunks == 0:
+        print(
+            f"Vector store at {store_path} is empty. Run `jai ingest <csv>` first.",
+            file=sys.stderr,
+        )
+        return 2
+    if not golden_path.exists():
+        print(f"Golden set not found at {golden_path}.", file=sys.stderr)
+        return 2
+
+    print(f"Store: {store.n_chunks:,} chunks  |  golden: {golden_path}  |  k={k}")
+    embedder = Embedder()
+    retriever = make_dense_retriever(store, embedder)
+    report = evaluate_path(golden_path, retriever, k=k)
+    print()
+    print(format_report(report))
     return 0
 
 
@@ -134,6 +163,29 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p_eval = sub.add_parser(
+        "eval",
+        help="Measure the dense-only retriever against the golden set.",
+    )
+    p_eval.add_argument(
+        "--store",
+        type=Path,
+        default=DEFAULT_STORE_PATH,
+        help=f"Chroma index path (default {DEFAULT_STORE_PATH}).",
+    )
+    p_eval.add_argument(
+        "--golden",
+        type=Path,
+        default=DEFAULT_GOLDEN_PATH,
+        help=f"JSONL golden set path (default {DEFAULT_GOLDEN_PATH}).",
+    )
+    p_eval.add_argument(
+        "-k",
+        type=int,
+        default=DEFAULT_K,
+        help=f"Retrieval cutoff (default {DEFAULT_K}).",
+    )
+
     return parser
 
 
@@ -150,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
         return _ingest(list(args.csvs), args.store)
     if args.command == "ask":
         return _ask(args.query, args.store, args.k, args.provider)
+    if args.command == "eval":
+        return _eval(args.store, args.golden, args.k)
 
     parser.print_help()
     return 0
