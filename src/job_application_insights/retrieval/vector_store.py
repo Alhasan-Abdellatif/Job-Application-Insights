@@ -42,7 +42,7 @@ from typing import Any
 
 import chromadb
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from job_application_insights.ingest.chunk import Chunk
 from job_application_insights.ingest.embed import assert_aligned
@@ -62,22 +62,26 @@ that limit so callers can pass whole corpora without thinking about it."""
 
 
 class RetrievalResult(BaseModel):
-    """One hit from a vector-store query.
+    """One hit from any retriever (dense, BM25, hybrid, reranked).
 
     Attributes
     ----------
     chunk
         The reconstructed :class:`Chunk` — text + metadata.
     score
-        Cosine similarity in ``[-1.0, 1.0]``. Higher = more similar.
-        Chroma natively returns cosine *distance* (``1 - similarity``); we
-        convert at the boundary so downstream code never has to remember.
+        Retriever-specific relevance signal — *higher is more
+        relevant within a single retriever's output*, but scales are
+        not comparable across retrievers. Dense (cosine) lives in
+        ``[-1, 1]``; BM25 is unbounded and typically non-negative but
+        can dip slightly negative for small-corpus IDF edge cases;
+        rerankers may use logits. Hybrid fusion compares **ranks**
+        (RRF) rather than raw scores so this scale mismatch is fine.
     """
 
     model_config = ConfigDict(frozen=True)
 
     chunk: Chunk
-    score: float = Field(..., ge=-1.0, le=1.0)
+    score: float
 
 
 # ────────────────────────────── helpers ──────────────────────────────
@@ -159,6 +163,26 @@ class VectorStore:
     def n_chunks(self) -> int:
         """Total number of chunks currently stored."""
         return int(self._collection.count())
+
+    def iter_chunks(self) -> list[Chunk]:
+        """Reconstruct every stored :class:`Chunk` from Chroma metadata.
+
+        Used by the BM25 retriever (which needs the chunks themselves,
+        not just embeddings) to avoid re-parsing the source CSVs. The
+        embeddings are *not* returned — only the text + metadata.
+
+        Order is whatever Chroma returns (no guarantee of insertion
+        order). Callers that need a stable ordering should sort by
+        ``chunk_id``.
+        """
+        data = self._collection.get(include=["documents", "metadatas"])
+        ids = data.get("ids") or []
+        docs = data.get("documents") or []
+        metas = data.get("metadatas") or []
+        return [
+            _metadata_to_chunk(cid, text or "", meta or {})
+            for cid, text, meta in zip(ids, docs, metas, strict=False)
+        ]
 
     def upsert(self, chunks: list[Chunk], embeddings: np.ndarray) -> None:
         """Insert or replace ``chunks`` with their ``embeddings``.

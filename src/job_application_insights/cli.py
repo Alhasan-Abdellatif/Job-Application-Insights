@@ -19,8 +19,10 @@ from pathlib import Path
 
 from job_application_insights import __version__
 from job_application_insights.evals.runner import (
+    RetrievalFn,
     evaluate_path,
     format_report,
+    make_bm25_retriever,
     make_dense_retriever,
 )
 from job_application_insights.generate import (
@@ -31,11 +33,14 @@ from job_application_insights.generate import (
 from job_application_insights.ingest.chunk import chunk_documents
 from job_application_insights.ingest.embed import Embedder
 from job_application_insights.ingest.parse import load_documents
+from job_application_insights.retrieval.bm25 import BM25Index
+from job_application_insights.retrieval.hybrid import make_hybrid_retriever
 from job_application_insights.retrieval.vector_store import VectorStore
 
 DEFAULT_STORE_PATH = Path("./data/chroma")
 DEFAULT_GOLDEN_PATH = Path("./evals/golden_set.jsonl")
 DEFAULT_K = 8
+RETRIEVER_NAMES: tuple[str, ...] = ("dense", "bm25", "hybrid")
 
 
 def _ingest(csvs: list[Path], store_path: Path) -> int:
@@ -87,8 +92,31 @@ def _ask(query: str, store_path: Path, k: int, provider: str) -> int:
     return 0
 
 
-def _eval(store_path: Path, golden_path: Path, k: int) -> int:
-    """Score the dense-only retriever against the golden set."""
+def _build_retriever(name: str, store: VectorStore) -> RetrievalFn:
+    """Construct the named retriever, paying only the cost it needs.
+
+    Dense pays the BGE-small load (~5s + ~250MB RAM). BM25 pays the
+    chunk-readback + tokenization (~1s for ~7k chunks). The factory
+    isolates each cost so other commands don't pay it unnecessarily.
+    """
+    if name == "dense":
+        embedder = Embedder()
+        return make_dense_retriever(store, embedder)
+    if name == "bm25":
+        chunks = store.iter_chunks()
+        index = BM25Index(chunks)
+        return make_bm25_retriever(index)
+    if name == "hybrid":
+        embedder = Embedder()
+        dense = make_dense_retriever(store, embedder)
+        index = BM25Index(store.iter_chunks())
+        bm25 = make_bm25_retriever(index)
+        return make_hybrid_retriever([dense, bm25])
+    raise ValueError(f"unknown retriever {name!r}; expected one of {RETRIEVER_NAMES}")
+
+
+def _eval(store_path: Path, golden_path: Path, k: int, retriever_name: str) -> int:
+    """Score the named retriever against the golden set."""
     store = VectorStore(store_path)
     if store.n_chunks == 0:
         print(
@@ -100,9 +128,11 @@ def _eval(store_path: Path, golden_path: Path, k: int) -> int:
         print(f"Golden set not found at {golden_path}.", file=sys.stderr)
         return 2
 
-    print(f"Store: {store.n_chunks:,} chunks  |  golden: {golden_path}  |  k={k}")
-    embedder = Embedder()
-    retriever = make_dense_retriever(store, embedder)
+    print(
+        f"Store: {store.n_chunks:,} chunks  |  golden: {golden_path}  |  "
+        f"retriever: {retriever_name}  |  k={k}"
+    )
+    retriever = _build_retriever(retriever_name, store)
     report = evaluate_path(golden_path, retriever, k=k)
     print()
     print(format_report(report))
@@ -185,6 +215,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_K,
         help=f"Retrieval cutoff (default {DEFAULT_K}).",
     )
+    p_eval.add_argument(
+        "--retriever",
+        choices=RETRIEVER_NAMES,
+        default="dense",
+        help=(
+            "Retriever to evaluate. 'dense' (BGE-small + Chroma cosine, "
+            "Week 1 baseline), 'bm25' (lexical, in-memory), or 'hybrid' "
+            "(both, fused with RRF k=60)."
+        ),
+    )
 
     return parser
 
@@ -203,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ask":
         return _ask(args.query, args.store, args.k, args.provider)
     if args.command == "eval":
-        return _eval(args.store, args.golden, args.k)
+        return _eval(args.store, args.golden, args.k, args.retriever)
 
     parser.print_help()
     return 0

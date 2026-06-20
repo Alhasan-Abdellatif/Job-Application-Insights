@@ -180,6 +180,22 @@ def make_dense_retriever(
     return retrieve
 
 
+def make_bm25_retriever(bm25_index: object) -> RetrievalFn:
+    """Wrap a :class:`~job_application_insights.retrieval.bm25.BM25Index`
+    as a ``RetrievalFn``.
+
+    The Day-2 lexical baseline: tokenized query → BM25 scores → top-K.
+    The factory exists for symmetry with :func:`make_dense_retriever` so
+    the CLI / evaluator stays generic over retriever type.
+    """
+
+    def retrieve(query: str, k: int) -> list[str]:
+        results = bm25_index.query(query, k=k)  # type: ignore[attr-defined]
+        return [r.chunk.chunk_id for r in results]
+
+    return retrieve
+
+
 # ────────────────────────────── pretty printer ──────────────────────────────
 
 

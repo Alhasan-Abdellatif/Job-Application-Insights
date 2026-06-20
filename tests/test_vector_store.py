@@ -259,11 +259,12 @@ def test_retrieval_result_is_frozen():
         result.score = 0.9  # type: ignore[misc]
 
 
-def test_retrieval_result_score_bounds():
+def test_retrieval_result_accepts_unbounded_scores():
+    """Score is unbounded — different retrievers (dense, BM25, reranker)
+    use incomparable scales. Hybrid fusion uses ranks, so the model
+    doesn't constrain the score field."""
     chunk = _chunk(0)
     RetrievalResult(chunk=chunk, score=-1.0)
     RetrievalResult(chunk=chunk, score=1.0)
-    with pytest.raises(ValidationError):
-        RetrievalResult(chunk=chunk, score=1.5)
-    with pytest.raises(ValidationError):
-        RetrievalResult(chunk=chunk, score=-1.5)
+    RetrievalResult(chunk=chunk, score=42.5)  # BM25-style positive
+    RetrievalResult(chunk=chunk, score=-0.27)  # rank_bm25 epsilon edge case
