@@ -134,6 +134,130 @@ def dcg_at_k(retrieved: Sequence[str], relevant: set[str], k: int) -> float:
     )
 
 
+def precision_at_k_groups(
+    retrieved: Sequence[str],
+    groups: Sequence[set[str]],
+    k: int,
+) -> float:
+    """Precision@K under answer-group semantics.
+
+    A retrieved chunk counts as "relevant" if it belongs to **any** answer
+    group. The metric is unchanged from chunk-level precision when each
+    group contains exactly one chunk.
+    """
+    _validate_groups(groups, k)
+    if not retrieved:
+        return 0.0
+    union: set[str] = set()
+    for g in groups:
+        union |= g
+    top_k = retrieved[:k]
+    hits = sum(1 for cid in top_k if cid in union)
+    return hits / k
+
+
+def recall_at_k_groups(
+    retrieved: Sequence[str],
+    groups: Sequence[set[str]],
+    k: int,
+) -> float:
+    """Recall@K under answer-group semantics — "fraction of *answers* found".
+
+    A group is "found" the first time any chunk from it appears in the
+    top-K. The score is ``hit_groups / total_groups``.
+
+    Reduces to chunk-level recall when each group has exactly one chunk —
+    so existing factoid entries behave exactly as before.
+
+    For aggregation questions ("which companies invited me to interview?"),
+    this is the metric that actually measures what the question asks:
+    *how many distinct entities did the retriever surface*, independent of
+    how many chunks per entity exist.
+    """
+    _validate_groups(groups, k)
+    if not retrieved:
+        return 0.0
+    top_k_set = set(retrieved[:k])
+    hits = sum(1 for g in groups if g & top_k_set)
+    return hits / len(groups)
+
+
+def reciprocal_rank_groups(
+    retrieved: Sequence[str],
+    groups: Sequence[set[str]],
+) -> float:
+    """``1 / rank`` of the first chunk that belongs to *any* group.
+
+    Averaged over a dataset this is the group-aware MRR. Identical to the
+    chunk-level MRR when each group is a singleton.
+    """
+    if not groups:
+        raise ValueError("`groups` must be non-empty")
+    union: set[str] = set()
+    for g in groups:
+        union |= g
+    for rank, cid in enumerate(retrieved, start=1):
+        if cid in union:
+            return 1.0 / rank
+    return 0.0
+
+
+def dcg_at_k_groups(
+    retrieved: Sequence[str],
+    groups: Sequence[set[str]],
+    k: int,
+) -> float:
+    """Set-cover DCG@K: gain accrues only the *first* time a group is hit.
+
+    ``gain_i = 1`` if the chunk at rank i belongs to an as-yet-unhit
+    group; otherwise 0. This is the natural DCG analogue of recall@K
+    under set-cover semantics: subsequent chunks from an already-found
+    answer don't add evidence, so they don't add gain.
+    """
+    _validate_groups(groups, k)
+    if not retrieved:
+        return 0.0
+    hit_groups: set[int] = set()
+    total = 0.0
+    for rank, cid in enumerate(retrieved[:k], start=1):
+        for g_idx, g in enumerate(groups):
+            if g_idx in hit_groups:
+                continue
+            if cid in g:
+                total += 1.0 / math.log2(rank + 1)
+                hit_groups.add(g_idx)
+                break
+    return total
+
+
+def ndcg_at_k_groups(
+    retrieved: Sequence[str],
+    groups: Sequence[set[str]],
+    k: int,
+) -> float:
+    """Normalised set-cover DCG@K. Lives in ``[0, 1]``.
+
+    Ideal ranking puts one chunk per group at the top, so
+    ``IDCG@k = Σ_{i=1..min(|groups|, k)} 1/log2(i+1)``.
+    """
+    _validate_groups(groups, k)
+    if not retrieved:
+        return 0.0
+    actual = dcg_at_k_groups(retrieved, groups, k)
+    ideal_hits = min(len(groups), k)
+    ideal = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_hits + 1))
+    return actual / ideal
+
+
+def _validate_groups(groups: Sequence[set[str]], k: int) -> None:
+    if not groups:
+        raise ValueError("`groups` must be non-empty")
+    if any(not g for g in groups):
+        raise ValueError("every group must contain ≥1 chunk")
+    if k <= 0:
+        raise ValueError(f"k must be positive, got {k}")
+
+
 def ndcg_at_k(retrieved: Sequence[str], relevant: set[str], k: int) -> float:
     """Normalised Discounted Cumulative Gain at K. Lives in ``[0, 1]``.
 

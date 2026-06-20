@@ -209,3 +209,130 @@ def test_reciprocal_rank_empty_relevant_raises():
 def test_non_positive_k_raises(fn, bad_k):
     with pytest.raises(ValueError, match="positive"):
         fn(["a"], {"a"}, bad_k)
+
+
+# ───── group-aware metrics ─────
+
+
+from job_application_insights.evals.metrics import (  # noqa: E402
+    dcg_at_k_groups,
+    ndcg_at_k_groups,
+    precision_at_k_groups,
+    recall_at_k_groups,
+    reciprocal_rank_groups,
+)
+
+
+def test_recall_groups_one_hit_per_group_is_perfect():
+    """Each of 3 groups has a chunk in the top-3 → recall = 1.0."""
+    groups = [{"a", "b"}, {"c"}, {"d", "e"}]
+    retrieved = ["a", "c", "d"]
+    assert recall_at_k_groups(retrieved, groups, 3) == pytest.approx(1.0)
+
+
+def test_recall_groups_finding_two_chunks_from_same_group_counts_once():
+    """The key property: extra chunks of an already-hit group give no credit."""
+    groups = [{"a", "b", "c"}, {"d"}]
+    # Retrieved 'a' and 'b' (same group) but missed group 2
+    retrieved = ["a", "b", "x"]
+    # Only 1 of 2 groups hit → recall = 0.5 (not 2/3 like the flat metric)
+    assert recall_at_k_groups(retrieved, groups, 3) == pytest.approx(0.5)
+
+
+def test_recall_groups_reduces_to_chunk_recall_with_singleton_groups():
+    """Backwards-compat: groups of size 1 should behave like flat recall."""
+    flat_relevant = {"a", "b", "c"}
+    groups = [{"a"}, {"b"}, {"c"}]
+    retrieved = ["a", "x", "b"]
+    assert recall_at_k_groups(retrieved, groups, 3) == recall_at_k(retrieved, flat_relevant, 3)
+
+
+def test_recall_groups_no_hits_is_zero():
+    assert recall_at_k_groups(["x"], [{"a"}, {"b"}], 3) == 0.0
+
+
+def test_recall_groups_caps_at_one_even_with_many_relevant_chunks():
+    """Even if every retrieved chunk is relevant, recall can't exceed 1.0."""
+    # One big group with 10 chunks. Top-3 are all in it.
+    groups = [set("abcdefghij")]
+    retrieved = ["a", "b", "c"]
+    assert recall_at_k_groups(retrieved, groups, 3) == pytest.approx(1.0)
+
+
+# ───── precision_at_k_groups ─────
+
+
+def test_precision_groups_counts_any_chunk_in_any_group():
+    groups = [{"a", "b"}, {"c"}]
+    retrieved = ["a", "x", "c", "y"]
+    # Top-4: a (hit), x (miss), c (hit), y (miss) → 2/4 = 0.5
+    assert precision_at_k_groups(retrieved, groups, 4) == pytest.approx(0.5)
+
+
+# ───── reciprocal_rank_groups ─────
+
+
+def test_mrr_groups_finds_first_chunk_in_any_group():
+    groups = [{"a"}, {"b", "c"}]
+    retrieved = ["x", "b", "a"]
+    # 'b' is in group 2 at rank 2 → 1/2 = 0.5
+    assert reciprocal_rank_groups(retrieved, groups) == pytest.approx(0.5)
+
+
+def test_mrr_groups_no_relevant_returns_zero():
+    assert reciprocal_rank_groups(["x", "y"], [{"a"}, {"b"}]) == 0.0
+
+
+# ───── ndcg_at_k_groups ─────
+
+
+def test_ndcg_groups_perfect_ranking_is_one():
+    groups = [{"a"}, {"b"}, {"c"}]
+    retrieved = ["a", "b", "c", "x", "y"]
+    assert ndcg_at_k_groups(retrieved, groups, 5) == pytest.approx(1.0)
+
+
+def test_ndcg_groups_subsequent_chunks_of_same_group_dont_help():
+    """Set-cover DCG: only the FIRST hit of each group accrues gain."""
+    # Two groups. Group1 = {a, b}, Group2 = {c}. Retrieved hits group1
+    # twice and never finds group2.
+    groups = [{"a", "b"}, {"c"}]
+    retrieved = ["a", "b", "x"]  # rank 1 hits group1; rank 2 is "wasted"
+    # DCG = 1/log2(2) = 1.0. IDCG@3 = 1/log2(2) + 1/log2(3) ≈ 1.6309
+    expected = 1.0 / (1.0 + 1.0 / math.log2(3))
+    assert ndcg_at_k_groups(retrieved, groups, 3) == pytest.approx(expected)
+
+
+def test_ndcg_groups_zero_for_no_hits():
+    assert ndcg_at_k_groups(["x"], [{"a"}], 1) == 0.0
+
+
+# ───── validation parity with chunk-level ─────
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        precision_at_k_groups,
+        recall_at_k_groups,
+        dcg_at_k_groups,
+        ndcg_at_k_groups,
+    ],
+)
+def test_groups_metrics_reject_empty_groups(fn):
+    with pytest.raises(ValueError, match="non-empty|empty"):
+        fn(["a"], [], 5)
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        precision_at_k_groups,
+        recall_at_k_groups,
+        dcg_at_k_groups,
+        ndcg_at_k_groups,
+    ],
+)
+def test_groups_metrics_reject_empty_inner_group(fn):
+    with pytest.raises(ValueError, match="≥1 chunk"):
+        fn(["a"], [{"a"}, set()], 3)

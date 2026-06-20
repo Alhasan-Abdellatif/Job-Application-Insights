@@ -32,10 +32,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from job_application_insights.evals.golden_set import GoldenEntry, load_golden_set
 from job_application_insights.evals.metrics import (
-    ndcg_at_k,
-    precision_at_k,
-    recall_at_k,
-    reciprocal_rank,
+    ndcg_at_k_groups,
+    precision_at_k_groups,
+    recall_at_k_groups,
+    reciprocal_rank_groups,
 )
 
 # ────────────────────────────── types ──────────────────────────────
@@ -119,16 +119,16 @@ def evaluate(
     rows: list[EvalRow] = []
     for entry in golden_set:
         retrieved = retrieve_fn(entry.question, k)
-        relevant = entry.relevant
+        groups = entry.groups  # canonical view — factoid entries auto-convert
         rows.append(
             EvalRow(
                 question=entry.question,
-                n_relevant=len(relevant),
+                n_relevant=len(groups),  # number of *distinct answers*, not chunks
                 n_retrieved=len(retrieved),
-                precision_at_k=precision_at_k(retrieved, relevant, k),
-                recall_at_k=recall_at_k(retrieved, relevant, k),
-                reciprocal_rank=reciprocal_rank(retrieved, relevant),
-                ndcg_at_k=ndcg_at_k(retrieved, relevant, k),
+                precision_at_k=precision_at_k_groups(retrieved, groups, k),
+                recall_at_k=recall_at_k_groups(retrieved, groups, k),
+                reciprocal_rank=reciprocal_rank_groups(retrieved, groups),
+                ndcg_at_k=ndcg_at_k_groups(retrieved, groups, k),
                 tags=entry.tags,
             )
         )
@@ -206,7 +206,7 @@ def format_report(report: EvalReport, *, show_rows: bool = True) -> str:
     lines.append("─" * 90)
 
     if show_rows:
-        header = f"{'P@k':>6}  {'R@k':>6}  {'MRR':>6}  {'nDCG':>6}  {'|rel|':>5}  question"
+        header = f"{'P@k':>6}  {'R@k':>6}  {'MRR':>6}  {'nDCG':>6}  {'|ans|':>5}  question"
         lines.append(header)
         lines.append("─" * 90)
         for row in report.rows:

@@ -38,6 +38,8 @@ data/processed/
 data/embeddings/
 *.mbox
 *.csv
+evals/golden_set_review.md
+evals/retrieval_review.md
 !evals/golden_set.jsonl
 !data/synthetic/**
 

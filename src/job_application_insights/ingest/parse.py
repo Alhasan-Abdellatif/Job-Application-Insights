@@ -87,7 +87,14 @@ _HTML_ENTITY_RE = re.compile(r"&(?:[a-zA-Z]+|#\d+);")
 
 
 def _is_missing(value: Any) -> bool:
-    """Return True for None, NaN, or whitespace-only strings."""
+    """Return True for None, NaN, whitespace-only strings, or the literal 'nan'.
+
+    The "literal 'nan'" check catches a pandas-specific gotcha: ``str(NaN)``
+    yields the three-character string ``"nan"``, and when callers stringify
+    a cell value before passing it through, that placeholder leaks all the
+    way into chunk text and gets embedded. Treating ``"nan"`` (case-insensitive)
+    as missing keeps junk out of the embeddings.
+    """
     if value is None:
         return True
     try:
@@ -95,7 +102,13 @@ def _is_missing(value: Any) -> bool:
             return True
     except (TypeError, ValueError):
         pass
-    return isinstance(value, str) and not value.strip()
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return True
+        if stripped.lower() == "nan":
+            return True
+    return False
 
 
 def _normalise(value: Any) -> str:

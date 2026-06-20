@@ -46,35 +46,59 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 # ────────────────────────────── data model ──────────────────────────────
 
 
 class GoldenEntry(BaseModel):
-    """One row of the eval set: a question paired with ground-truth chunks.
+    """One row of the eval set: a question paired with its ground truth.
+
+    Two complementary representations are supported:
+
+    * ``relevant_chunk_ids`` — flat list. Every listed chunk is its own
+      independent "answer unit". Recall = fraction of chunks found.
+      Right for factoid questions ("Did I apply to ALESAYI?") and for
+      single-entity questions where every chunk matters individually.
+    * ``answer_groups`` — list of lists. Each inner list is one *answer*;
+      finding any chunk from that list counts as finding the answer.
+      Right for aggregation questions ("Which companies invited me to
+      an interview?") where the answer is a set of entities and the
+      question is whether each entity surfaces — independent of how
+      many chunks per entity exist.
+
+    Exactly one of the two is required (validator enforces it). Internally
+    the :attr:`groups` property gives a single canonical view: a list of
+    sets, one per answer. The runner always calls the group-aware metrics
+    against ``groups``, so the user sees a unified recall semantics
+    regardless of which field they used.
 
     Fields
     ------
     question
-        The natural-language question to ask the retriever. Stripped of
-        surrounding whitespace on construction.
+        The natural-language question. Stripped of surrounding whitespace.
     relevant_chunk_ids
-        IDs of every chunk that *should* be retrieved for this question.
-        Must be non-empty (an entry with no answer is a data bug) and
-        unique (duplicates would silently inflate ``len(relevant)``).
+        Flat list of chunk IDs (legacy / factoid form).
+    answer_groups
+        List of chunk-ID lists, one list per distinct answer.
     tags
-        Optional labels for slicing eval results — e.g. ``"aggregation"``,
-        ``"single-fact"``, ``"negation"``. Defaults to empty.
+        Optional labels for slicing eval results.
     notes
-        Free-text for the curator. Useful when an entry is intentionally
-        tricky and you want to remember why. Defaults to empty.
+        Free-text curator notes.
     """
 
     model_config = ConfigDict(frozen=True)
 
     question: str = Field(..., min_length=1)
-    relevant_chunk_ids: list[str] = Field(..., min_length=1)
+    relevant_chunk_ids: list[str] | None = Field(default=None)
+    answer_groups: list[list[str]] | None = Field(default=None)
     tags: list[str] = Field(default_factory=list)
     notes: str = Field(default="")
 
@@ -88,17 +112,69 @@ class GoldenEntry(BaseModel):
 
     @field_validator("relevant_chunk_ids")
     @classmethod
-    def _validate_chunk_ids(cls, v: list[str]) -> list[str]:
+    def _validate_chunk_ids(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("relevant_chunk_ids may not be an empty list")
         if any(not cid or not cid.strip() for cid in v):
             raise ValueError("relevant_chunk_ids may not contain empty strings")
         if len(set(v)) != len(v):
             raise ValueError("relevant_chunk_ids must be unique within an entry")
         return v
 
+    @field_validator("answer_groups")
+    @classmethod
+    def _validate_answer_groups(cls, v: list[list[str]] | None) -> list[list[str]] | None:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("answer_groups may not be an empty list")
+        seen: set[str] = set()
+        for i, group in enumerate(v):
+            if not group:
+                raise ValueError(f"answer_groups[{i}] is empty; every group needs ≥1 chunk")
+            if any(not cid or not cid.strip() for cid in group):
+                raise ValueError(f"answer_groups[{i}] contains empty chunk IDs")
+            if len(set(group)) != len(group):
+                raise ValueError(f"answer_groups[{i}] has duplicate chunks within the group")
+            for cid in group:
+                if cid in seen:
+                    raise ValueError(f"chunk {cid!r} appears in multiple answer_groups")
+                seen.add(cid)
+        return v
+
+    @model_validator(mode="after")
+    def _require_one_form(self) -> GoldenEntry:
+        if self.relevant_chunk_ids is None and self.answer_groups is None:
+            raise ValueError("entry must provide either relevant_chunk_ids or answer_groups")
+        if self.relevant_chunk_ids is not None and self.answer_groups is not None:
+            raise ValueError(
+                "entry must provide exactly one of relevant_chunk_ids OR answer_groups, not both"
+            )
+        return self
+
+    @property
+    def groups(self) -> list[set[str]]:
+        """Canonical view: one ``set[str]`` per answer.
+
+        - If ``answer_groups`` was provided, return it as a list of sets.
+        - Otherwise convert ``relevant_chunk_ids`` to one chunk per
+          group — recovering the traditional chunk-level recall semantics.
+        """
+        if self.answer_groups is not None:
+            return [set(group) for group in self.answer_groups]
+        # relevant_chunk_ids is guaranteed non-None by the model validator
+        assert self.relevant_chunk_ids is not None
+        return [{cid} for cid in self.relevant_chunk_ids]
+
     @property
     def relevant(self) -> set[str]:
-        """``relevant_chunk_ids`` as a ``set`` — the shape metrics expect."""
-        return set(self.relevant_chunk_ids)
+        """All chunks across all answer groups (union). Kept for back-compat."""
+        result: set[str] = set()
+        for group in self.groups:
+            result |= group
+        return result
 
 
 # ────────────────────────────── I/O ──────────────────────────────

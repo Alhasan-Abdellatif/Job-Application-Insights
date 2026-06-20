@@ -74,6 +74,19 @@ def test_parse_email_date_invalid_returns_none():
     assert parse_email_date(float("nan")) is None
 
 
+def test_is_missing_treats_literal_nan_string_as_missing():
+    """str(NaN) yields 'nan' — that's pandas-junk, not real content."""
+    from job_application_insights.ingest.parse import _is_missing
+
+    assert _is_missing("nan") is True
+    assert _is_missing("NaN") is True
+    assert _is_missing("  nan  ") is True
+    assert _is_missing("NAN") is True
+    # Sanity: an actual word that happens to contain 'nan' is not missing
+    assert _is_missing("nancy") is False
+    assert _is_missing("banana") is False
+
+
 # ───── load_documents ─────
 
 

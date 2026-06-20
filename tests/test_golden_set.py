@@ -183,3 +183,84 @@ def test_load_and_save_accept_str_paths(tmp_path: Path):
     save_golden_set([GoldenEntry(question="q", relevant_chunk_ids=["a"])], path_str)
     loaded = load_golden_set(path_str)
     assert len(loaded) == 1
+
+
+# ───── answer_groups ─────
+
+
+def test_answer_groups_basic():
+    entry = GoldenEntry(
+        question="Which companies invited me to interview?",
+        answer_groups=[["a", "b", "c"], ["d", "e"], ["f"]],
+    )
+    assert len(entry.groups) == 3
+    assert entry.groups[0] == {"a", "b", "c"}
+    assert entry.groups[1] == {"d", "e"}
+    assert entry.groups[2] == {"f"}
+
+
+def test_answer_groups_relevant_property_unions_all_groups():
+    entry = GoldenEntry(question="q", answer_groups=[["a"], ["b", "c"]])
+    assert entry.relevant == {"a", "b", "c"}
+
+
+def test_relevant_chunk_ids_auto_converts_to_one_chunk_per_group():
+    """Backwards compat: a flat list becomes one group per chunk."""
+    entry = GoldenEntry(question="q", relevant_chunk_ids=["a", "b", "c"])
+    assert len(entry.groups) == 3
+    assert entry.groups == [{"a"}, {"b"}, {"c"}]
+
+
+def test_either_one_form_required():
+    with pytest.raises(ValidationError, match="either"):
+        GoldenEntry(question="q")
+
+
+def test_cannot_specify_both_forms():
+    with pytest.raises(ValidationError, match="not both"):
+        GoldenEntry(question="q", relevant_chunk_ids=["a"], answer_groups=[["b"]])
+
+
+def test_answer_groups_rejects_empty_outer_list():
+    with pytest.raises(ValidationError):
+        GoldenEntry(question="q", answer_groups=[])
+
+
+def test_answer_groups_rejects_empty_inner_list():
+    with pytest.raises(ValidationError, match="empty"):
+        GoldenEntry(question="q", answer_groups=[["a"], []])
+
+
+def test_answer_groups_rejects_duplicate_within_group():
+    with pytest.raises(ValidationError, match="duplicate"):
+        GoldenEntry(question="q", answer_groups=[["a", "a"]])
+
+
+def test_answer_groups_rejects_chunk_in_multiple_groups():
+    """A chunk that belongs to two different answers is a curator error."""
+    with pytest.raises(ValidationError, match="multiple"):
+        GoldenEntry(question="q", answer_groups=[["a", "b"], ["b", "c"]])
+
+
+def test_answer_groups_rejects_empty_chunk_id():
+    with pytest.raises(ValidationError):
+        GoldenEntry(question="q", answer_groups=[["a", ""]])
+
+
+def test_answer_groups_round_trip(tmp_path: Path):
+    entries = [
+        GoldenEntry(
+            question="agg q",
+            answer_groups=[["a", "b"], ["c"]],
+            tags=["agg"],
+        ),
+        GoldenEntry(question="factoid q", relevant_chunk_ids=["d"]),
+    ]
+    path = tmp_path / "g.jsonl"
+    save_golden_set(entries, path)
+    loaded = load_golden_set(path)
+    assert loaded == entries
+    # The factoid entry still works the old way
+    assert loaded[1].groups == [{"d"}]
+    # The aggregation entry preserves groups
+    assert loaded[0].groups == [{"a", "b"}, {"c"}]
