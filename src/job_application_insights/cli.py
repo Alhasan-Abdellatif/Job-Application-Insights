@@ -35,12 +35,16 @@ from job_application_insights.ingest.embed import Embedder
 from job_application_insights.ingest.parse import load_documents
 from job_application_insights.retrieval.bm25 import BM25Index
 from job_application_insights.retrieval.hybrid import make_hybrid_retriever
+from job_application_insights.retrieval.rerank import (
+    CrossEncoderReranker,
+    make_reranked_retriever,
+)
 from job_application_insights.retrieval.vector_store import VectorStore
 
 DEFAULT_STORE_PATH = Path("./data/chroma")
 DEFAULT_GOLDEN_PATH = Path("./evals/golden_set.jsonl")
 DEFAULT_K = 8
-RETRIEVER_NAMES: tuple[str, ...] = ("dense", "bm25", "hybrid")
+RETRIEVER_NAMES: tuple[str, ...] = ("dense", "bm25", "hybrid", "rerank")
 
 
 def _ingest(csvs: list[Path], store_path: Path) -> int:
@@ -112,6 +116,20 @@ def _build_retriever(name: str, store: VectorStore) -> RetrievalFn:
         index = BM25Index(store.iter_chunks())
         bm25 = make_bm25_retriever(index)
         return make_hybrid_retriever([dense, bm25])
+    if name == "rerank":
+        # Hybrid (dense + BM25 + RRF) as the candidate funnel, then a
+        # cross-encoder reranks the top fetch_k. The chunks are read
+        # from the store once and reused for both BM25 indexing and the
+        # text-lookup the reranker needs.
+        embedder = Embedder()
+        dense = make_dense_retriever(store, embedder)
+        chunks = store.iter_chunks()
+        index = BM25Index(chunks)
+        bm25 = make_bm25_retriever(index)
+        hybrid = make_hybrid_retriever([dense, bm25])
+        chunk_text_by_id = {c.chunk_id: c.text for c in chunks}
+        reranker = CrossEncoderReranker()
+        return make_reranked_retriever(hybrid, reranker, chunk_text_by_id.__getitem__)
     raise ValueError(f"unknown retriever {name!r}; expected one of {RETRIEVER_NAMES}")
 
 
@@ -221,8 +239,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="dense",
         help=(
             "Retriever to evaluate. 'dense' (BGE-small + Chroma cosine, "
-            "Week 1 baseline), 'bm25' (lexical, in-memory), or 'hybrid' "
-            "(both, fused with RRF k=60)."
+            "Week 1 baseline), 'bm25' (lexical, in-memory), 'hybrid' "
+            "(both, fused with RRF k=60), or 'rerank' (hybrid + "
+            "BGE-reranker-base cross-encoder over the top-50 candidates)."
         ),
     )
 
