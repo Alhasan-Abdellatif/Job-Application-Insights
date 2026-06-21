@@ -17,5 +17,24 @@ from job_application_insights.structured.table import (
     TABLE_NAME,
     load_applications_table,
 )
+from job_application_insights.structured.tools import (
+    CompanyCount,
+    MonthCount,
+    RoleRecord,
+    applications_by_month,
+    count_applications,
+    find_company_role,
+    top_companies,
+)
 
-__all__ = ["TABLE_NAME", "load_applications_table"]
+__all__ = [
+    "TABLE_NAME",
+    "CompanyCount",
+    "MonthCount",
+    "RoleRecord",
+    "applications_by_month",
+    "count_applications",
+    "find_company_role",
+    "load_applications_table",
+    "top_companies",
+]
