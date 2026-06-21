@@ -39,7 +39,7 @@ from job_application_insights.retrieval.rerank import (
     CrossEncoderReranker,
     make_reranked_retriever,
 )
-from job_application_insights.retrieval.vector_store import VectorStore
+from job_application_insights.retrieval.vector_store import RetrievalResult, VectorStore
 
 DEFAULT_STORE_PATH = Path("./data/chroma")
 DEFAULT_GOLDEN_PATH = Path("./evals/golden_set.jsonl")
@@ -71,8 +71,14 @@ def _ingest(csvs: list[Path], store_path: Path) -> int:
     return 0
 
 
-def _ask(query: str, store_path: Path, k: int, provider: str) -> int:
-    """Embed the query → retrieve top-k → generate cited answer."""
+def _ask(
+    query: str,
+    store_path: Path,
+    k: int,
+    provider: str,
+    retriever_name: str,
+) -> int:
+    """Retrieve top-k via the named retriever, generate a cited answer."""
     store = VectorStore(store_path)
     if store.n_chunks == 0:
         print(
@@ -81,9 +87,23 @@ def _ask(query: str, store_path: Path, k: int, provider: str) -> int:
         )
         return 2
 
-    embedder = Embedder()
-    query_vec = embedder.embed([query])[0]
-    results = store.query(query_vec, k=k)
+    print(f"Building '{retriever_name}' retriever…", file=sys.stderr)
+    retriever = _build_retriever(retriever_name, store)
+    chunks_by_id = {c.chunk_id: c for c in store.iter_chunks()}
+
+    retrieved_ids = retriever(query, k)
+    # The Reranker, BM25, and hybrid retrievers return chunk IDs, not raw
+    # scores. We rebuild RetrievalResult objects so generate_answer's
+    # signature stays uniform; the placeholder score is rank-derived so
+    # citations are still visually ordered. For the dense path users will
+    # see the values as smoothly descending in [0, 1] — not literal
+    # cosine similarities. If you need exact retriever scores, look at
+    # the raw retriever output directly.
+    results = [
+        RetrievalResult(chunk=chunks_by_id[cid], score=1.0 - i / max(len(retrieved_ids), 1))
+        for i, cid in enumerate(retrieved_ids)
+        if cid in chunks_by_id
+    ]
 
     client = make_llm_client(provider)
     answer = generate_answer(query, results, client)
@@ -92,7 +112,7 @@ def _ask(query: str, store_path: Path, k: int, provider: str) -> int:
     print()
     print("─── citations ───")
     for cit in answer.citations:
-        print(f"  [{cit.chunk_id}]  sim={cit.score:.3f}  {cit.snippet[:80]}…")
+        print(f"  [{cit.chunk_id}]  rank-score={cit.score:.3f}  {cit.snippet[:80]}…")
     return 0
 
 
@@ -210,6 +230,16 @@ def build_parser() -> argparse.ArgumentParser:
             "/ GOOGLE_API_KEY."
         ),
     )
+    p_ask.add_argument(
+        "--retriever",
+        choices=RETRIEVER_NAMES,
+        default="dense",
+        help=(
+            "Retriever to use. 'dense' (default; Week-1 baseline), 'bm25' "
+            "(lexical), 'hybrid' (RRF fusion of both), or 'rerank' "
+            "(hybrid + BGE-reranker-base cross-encoder)."
+        ),
+    )
 
     p_eval = sub.add_parser(
         "eval",
@@ -260,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ingest":
         return _ingest(list(args.csvs), args.store)
     if args.command == "ask":
-        return _ask(args.query, args.store, args.k, args.provider)
+        return _ask(args.query, args.store, args.k, args.provider, args.retriever)
     if args.command == "eval":
         return _eval(args.store, args.golden, args.k, args.retriever)
 

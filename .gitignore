@@ -41,7 +41,11 @@ data/embeddings/
 evals/golden_set_review.md
 evals/retrieval_review.md
 !evals/golden_set.jsonl
-!data/synthetic/**
+# personal-email-derived subset — not for git
+data/synthetic/ack_only.csv
+# anything else under data/synthetic/ is fair game (synthetic test data)
+!data/synthetic/*.jsonl
+!data/synthetic/*.json
 
 # ── Vector store ──────────────────────────────────────
 .chroma/
