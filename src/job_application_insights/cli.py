@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from job_application_insights import __version__
+from job_application_insights.agents.tool_use import GeminiToolUseAgent
 from job_application_insights.evals.runner import (
     RetrievalFn,
     evaluate_path,
@@ -40,11 +41,14 @@ from job_application_insights.retrieval.rerank import (
     make_reranked_retriever,
 )
 from job_application_insights.retrieval.vector_store import RetrievalResult, VectorStore
+from job_application_insights.structured.table import load_applications_table
 
 DEFAULT_STORE_PATH = Path("./data/chroma")
 DEFAULT_GOLDEN_PATH = Path("./evals/golden_set.jsonl")
+DEFAULT_STRUCTURED_CSV = Path("./data/synthetic/ack_only.csv")
 DEFAULT_K = 8
 RETRIEVER_NAMES: tuple[str, ...] = ("dense", "bm25", "hybrid", "rerank")
+ASK_MODE_NAMES: tuple[str, ...] = ("rag", "tools")
 
 
 def _ingest(csvs: list[Path], store_path: Path) -> int:
@@ -113,6 +117,30 @@ def _ask(
     print("─── citations ───")
     for cit in answer.citations:
         print(f"  [{cit.chunk_id}]  rank-score={cit.score:.3f}  {cit.snippet[:80]}…")
+    return 0
+
+
+def _ask_tools(query: str, structured_csv: Path) -> int:
+    """Run a Gemini tool-use round-trip over the structured side-table."""
+    if not structured_csv.exists():
+        print(
+            f"Structured CSV not found at {structured_csv}. "
+            f"Run `python scripts/filter_acks.py` first to build it.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"Loading structured table from {structured_csv}…", file=sys.stderr)
+    con = load_applications_table(structured_csv)
+    agent = GeminiToolUseAgent(con)
+    result = agent.answer(query)
+
+    print(result.text)
+    print()
+    print(f"─── tool calls  ({result.stopped_reason}) ───")
+    for tc in result.tool_calls:
+        args_str = ", ".join(f"{k}={v!r}" for k, v in tc.arguments.items())
+        print(f"  {tc.name}({args_str}) → {tc.output}")
     return 0
 
 
@@ -240,6 +268,23 @@ def build_parser() -> argparse.ArgumentParser:
             "(hybrid + BGE-reranker-base cross-encoder)."
         ),
     )
+    p_ask.add_argument(
+        "--mode",
+        choices=ASK_MODE_NAMES,
+        default="rag",
+        help=(
+            "Answer mode. 'rag' (default) uses retrieve+generate over the "
+            "vector store. 'tools' uses the Gemini tool-use agent over the "
+            "structured DuckDB table — best for count / aggregation / top-N "
+            "questions that RAG cannot answer."
+        ),
+    )
+    p_ask.add_argument(
+        "--structured-csv",
+        type=Path,
+        default=DEFAULT_STRUCTURED_CSV,
+        help=(f"Path to the ack-only CSV for tools mode " f"(default {DEFAULT_STRUCTURED_CSV})."),
+    )
 
     p_eval = sub.add_parser(
         "eval",
@@ -290,6 +335,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ingest":
         return _ingest(list(args.csvs), args.store)
     if args.command == "ask":
+        if args.mode == "tools":
+            return _ask_tools(args.query, args.structured_csv)
         return _ask(args.query, args.store, args.k, args.provider, args.retriever)
     if args.command == "eval":
         return _eval(args.store, args.golden, args.k, args.retriever)
