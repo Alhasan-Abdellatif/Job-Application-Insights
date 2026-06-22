@@ -17,7 +17,12 @@ import argparse
 import sys
 from pathlib import Path
 
+from google import genai
+from google.genai import types as genai_types
+
 from job_application_insights import __version__
+from job_application_insights.agents.orchestrator import AgenticAgent
+from job_application_insights.agents.router import RouterDecision, classify
 from job_application_insights.agents.tool_use import GeminiToolUseAgent
 from job_application_insights.evals.runner import (
     RetrievalFn,
@@ -47,8 +52,9 @@ DEFAULT_STORE_PATH = Path("./data/chroma")
 DEFAULT_GOLDEN_PATH = Path("./evals/golden_set.jsonl")
 DEFAULT_STRUCTURED_CSV = Path("./data/synthetic/ack_only.csv")
 DEFAULT_K = 8
+DEFAULT_ROUTER_MODEL = "gemini-2.5-flash"
 RETRIEVER_NAMES: tuple[str, ...] = ("dense", "bm25", "hybrid", "rerank")
-ASK_MODE_NAMES: tuple[str, ...] = ("rag", "tools")
+ASK_MODE_NAMES: tuple[str, ...] = ("rag", "tools", "auto")
 
 
 def _ingest(csvs: list[Path], store_path: Path) -> int:
@@ -117,6 +123,84 @@ def _ask(
     print("─── citations ───")
     for cit in answer.citations:
         print(f"  [{cit.chunk_id}]  rank-score={cit.score:.3f}  {cit.snippet[:80]}…")
+    return 0
+
+
+def _ask_auto(
+    query: str,
+    store_path: Path,
+    structured_csv: Path,
+    k: int,
+    provider: str,
+    retriever_name: str,
+) -> int:
+    """Full agentic loop: router → RAG / structured / both → typed answer.
+
+    Loads BOTH engines up front because the router's decision is only
+    known after a Gemini call. For Day 4 the trade-off is acceptable —
+    Day 5 can add lazy construction if startup cost becomes a problem.
+    """
+    store = VectorStore(store_path)
+    if store.n_chunks == 0:
+        print(
+            f"Vector store at {store_path} is empty. Run `jai ingest <csv>` first.",
+            file=sys.stderr,
+        )
+        return 2
+    if not structured_csv.exists():
+        print(
+            f"Structured CSV not found at {structured_csv}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"Building '{retriever_name}' retriever + structured table…", file=sys.stderr)
+    retriever = _build_retriever(retriever_name, store)
+    chunks_by_id = {c.chunk_id: c for c in store.iter_chunks()}
+    con = load_applications_table(structured_csv)
+
+    client = genai.Client()
+
+    def _router_generate(
+        contents: list[genai_types.Content],
+        config: genai_types.GenerateContentConfig,
+    ) -> genai_types.GenerateContentResponse:
+        return client.models.generate_content(
+            model=DEFAULT_ROUTER_MODEL,
+            contents=contents,
+            config=config,
+        )
+
+    def _router(question: str) -> RouterDecision:
+        return classify(question, generate_fn=_router_generate)
+
+    agent = AgenticAgent(
+        classifier=_router,
+        tool_agent=GeminiToolUseAgent(con),
+        retriever=retriever,
+        chunks_by_id=chunks_by_id,
+        rag_client=make_llm_client(provider),
+        retrieval_k=k,
+    )
+    result = agent.answer(query)
+
+    print(f"─── router decision: {result.decision.mode} ───")
+    if result.decision.mode == "both":
+        print(f"  structured: {result.decision.structured_question}")
+        print(f"  rag:        {result.decision.rag_question}")
+    print()
+    print(result.text)
+    if result.tool_calls:
+        print()
+        print(f"─── tool calls  ({result.stopped_reason}) ───")
+        for tc in result.tool_calls:
+            args_str = ", ".join(f"{k_}={v!r}" for k_, v in tc.arguments.items())
+            print(f"  {tc.name}({args_str}) → {tc.output}")
+    if result.citations:
+        print()
+        print("─── citations ───")
+        for cit in result.citations:
+            print(f"  [{cit.chunk_id}]  rank-score={cit.score:.3f}  {cit.snippet[:80]}…")
     return 0
 
 
@@ -275,8 +359,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Answer mode. 'rag' (default) uses retrieve+generate over the "
             "vector store. 'tools' uses the Gemini tool-use agent over the "
-            "structured DuckDB table — best for count / aggregation / top-N "
-            "questions that RAG cannot answer."
+            "structured DuckDB table. 'auto' runs the question router and "
+            "dispatches to RAG / structured / both per its decision — "
+            "loads both engines up front."
         ),
     )
     p_ask.add_argument(
@@ -323,7 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI dispatch
     """CLI entry point. Returns a process exit code."""
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -337,6 +422,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ask":
         if args.mode == "tools":
             return _ask_tools(args.query, args.structured_csv)
+        if args.mode == "auto":
+            return _ask_auto(
+                args.query,
+                args.store,
+                args.structured_csv,
+                args.k,
+                args.provider,
+                args.retriever,
+            )
         return _ask(args.query, args.store, args.k, args.provider, args.retriever)
     if args.command == "eval":
         return _eval(args.store, args.golden, args.k, args.retriever)
