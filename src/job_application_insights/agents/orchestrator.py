@@ -35,6 +35,7 @@ from job_application_insights.generate import (
     generate_answer,
 )
 from job_application_insights.ingest.chunk import Chunk
+from job_application_insights.retrieval.parent_docs import expand_to_parent_documents
 from job_application_insights.retrieval.vector_store import RetrievalResult
 
 DEFAULT_RETRIEVAL_K: int = 8
@@ -88,6 +89,7 @@ class AgenticAgent:
         chunks_by_id: dict[str, Chunk],
         rag_client: LLMClient,
         retrieval_k: int = DEFAULT_RETRIEVAL_K,
+        expand_parents: bool = False,
     ) -> None:
         self._classifier = classifier
         self._tool_agent = tool_agent
@@ -95,6 +97,7 @@ class AgenticAgent:
         self._chunks_by_id = chunks_by_id
         self._rag_client = rag_client
         self._k = retrieval_k
+        self._expand_parents = expand_parents
 
     def answer(self, question: str) -> AgenticAnswer:
         """Classify the question, dispatch to the right engine(s), return."""
@@ -196,9 +199,12 @@ class AgenticAgent:
 
         Mirrors :func:`cli._ask`'s rank-derived synthetic score — keeps
         citations visually ordered without lying about the literal score.
+        If ``expand_parents=True`` was set at construction time, the
+        retrieved chunks are expanded to their full parent emails
+        before being returned (citation handles become doc_ids).
         """
         retrieved_ids = self._retriever(query, self._k)
-        return [
+        results = [
             RetrievalResult(
                 chunk=self._chunks_by_id[cid],
                 score=1.0 - i / max(len(retrieved_ids), 1),
@@ -206,6 +212,9 @@ class AgenticAgent:
             for i, cid in enumerate(retrieved_ids)
             if cid in self._chunks_by_id
         ]
+        if self._expand_parents:
+            results = expand_to_parent_documents(results, self._chunks_by_id)
+        return results
 
     def _compose_prompt(
         self,

@@ -41,6 +41,7 @@ from job_application_insights.ingest.embed import Embedder
 from job_application_insights.ingest.parse import load_documents
 from job_application_insights.retrieval.bm25 import BM25Index
 from job_application_insights.retrieval.hybrid import make_hybrid_retriever
+from job_application_insights.retrieval.parent_docs import expand_to_parent_documents
 from job_application_insights.retrieval.rerank import (
     CrossEncoderReranker,
     make_reranked_retriever,
@@ -87,6 +88,7 @@ def _ask(
     k: int,
     provider: str,
     retriever_name: str,
+    expand_parents: bool = False,
 ) -> int:
     """Retrieve top-k via the named retriever, generate a cited answer."""
     store = VectorStore(store_path)
@@ -114,6 +116,10 @@ def _ask(
         for i, cid in enumerate(retrieved_ids)
         if cid in chunks_by_id
     ]
+    if expand_parents:
+        print(f"Expanding {len(results)} chunks to parent documents…", file=sys.stderr)
+        results = expand_to_parent_documents(results, chunks_by_id)
+        print(f"  -> {len(results)} parent documents", file=sys.stderr)
 
     client = make_llm_client(provider)
     answer = generate_answer(query, results, client)
@@ -133,6 +139,7 @@ def _ask_auto(
     k: int,
     provider: str,
     retriever_name: str,
+    expand_parents: bool = False,
 ) -> int:
     """Full agentic loop: router → RAG / structured / both → typed answer.
 
@@ -181,6 +188,7 @@ def _ask_auto(
         chunks_by_id=chunks_by_id,
         rag_client=make_llm_client(provider),
         retrieval_k=k,
+        expand_parents=expand_parents,
     )
     result = agent.answer(query)
 
@@ -368,7 +376,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--structured-csv",
         type=Path,
         default=DEFAULT_STRUCTURED_CSV,
-        help=(f"Path to the ack-only CSV for tools mode " f"(default {DEFAULT_STRUCTURED_CSV})."),
+        help=(f"Path to the ack-only CSV for tools mode (default {DEFAULT_STRUCTURED_CSV})."),
+    )
+    p_ask.add_argument(
+        "--expand-parents",
+        action="store_true",
+        help=(
+            "After retrieval, expand each chunk to its full parent email "
+            "before generation. Improves answer quality on long emails "
+            "but multiplies LLM input tokens (~3-5x per query). Off by "
+            "default. Has no effect in 'tools' mode (no retrieval)."
+        ),
     )
 
     p_eval = sub.add_parser(
@@ -430,8 +448,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI
                 args.k,
                 args.provider,
                 args.retriever,
+                expand_parents=args.expand_parents,
             )
-        return _ask(args.query, args.store, args.k, args.provider, args.retriever)
+        return _ask(
+            args.query,
+            args.store,
+            args.k,
+            args.provider,
+            args.retriever,
+            expand_parents=args.expand_parents,
+        )
     if args.command == "eval":
         return _eval(args.store, args.golden, args.k, args.retriever)
 
