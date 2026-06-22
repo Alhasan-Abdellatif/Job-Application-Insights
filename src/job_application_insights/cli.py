@@ -17,13 +17,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from google import genai
-from google.genai import types as genai_types
-
 from job_application_insights import __version__
+from job_application_insights.agents.backends import AGENT_PROVIDER_NAMES
 from job_application_insights.agents.orchestrator import AgenticAgent
 from job_application_insights.agents.router import RouterDecision, classify
-from job_application_insights.agents.tool_use import GeminiToolUseAgent
+from job_application_insights.agents.tool_use import LiveToolUseAgent
 from job_application_insights.evals.runner import (
     RetrievalFn,
     evaluate_path,
@@ -53,7 +51,7 @@ DEFAULT_STORE_PATH = Path("./data/chroma")
 DEFAULT_GOLDEN_PATH = Path("./evals/golden_set.jsonl")
 DEFAULT_STRUCTURED_CSV = Path("./data/synthetic/ack_only.csv")
 DEFAULT_K = 8
-DEFAULT_ROUTER_MODEL = "gemini-2.5-flash"
+DEFAULT_AGENT_PROVIDER = "gemini"
 RETRIEVER_NAMES: tuple[str, ...] = ("dense", "bm25", "hybrid", "rerank")
 ASK_MODE_NAMES: tuple[str, ...] = ("rag", "tools", "auto")
 
@@ -139,13 +137,16 @@ def _ask_auto(
     k: int,
     provider: str,
     retriever_name: str,
+    agent_provider: str,
     expand_parents: bool = False,
 ) -> int:
     """Full agentic loop: router → RAG / structured / both → typed answer.
 
     Loads BOTH engines up front because the router's decision is only
-    known after a Gemini call. For Day 4 the trade-off is acceptable —
-    Day 5 can add lazy construction if startup cost becomes a problem.
+    known after an LLM call. ``provider`` controls the RAG / compose
+    LLM; ``agent_provider`` controls the router + tool-use agent (these
+    are decoupled so you can pair a cheap fast model for routing with a
+    higher-quality model for compose).
     """
     store = VectorStore(store_path)
     if store.n_chunks == 0:
@@ -161,29 +162,23 @@ def _ask_auto(
         )
         return 2
 
-    print(f"Building '{retriever_name}' retriever + structured table…", file=sys.stderr)
+    print(
+        f"Building '{retriever_name}' retriever + structured table  "
+        f"(agent={agent_provider}, rag={provider})…",
+        file=sys.stderr,
+    )
     retriever = _build_retriever(retriever_name, store)
     chunks_by_id = {c.chunk_id: c for c in store.iter_chunks()}
     con = load_applications_table(structured_csv)
 
-    client = genai.Client()
-
-    def _router_generate(
-        contents: list[genai_types.Content],
-        config: genai_types.GenerateContentConfig,
-    ) -> genai_types.GenerateContentResponse:
-        return client.models.generate_content(
-            model=DEFAULT_ROUTER_MODEL,
-            contents=contents,
-            config=config,
-        )
+    router_client = make_llm_client(agent_provider)
 
     def _router(question: str) -> RouterDecision:
-        return classify(question, generate_fn=_router_generate)
+        return classify(question, llm_client=router_client)
 
     agent = AgenticAgent(
         classifier=_router,
-        tool_agent=GeminiToolUseAgent(con),
+        tool_agent=LiveToolUseAgent(con, provider=agent_provider),
         retriever=retriever,
         chunks_by_id=chunks_by_id,
         rag_client=make_llm_client(provider),
@@ -212,8 +207,13 @@ def _ask_auto(
     return 0
 
 
-def _ask_tools(query: str, structured_csv: Path) -> int:
-    """Run a Gemini tool-use round-trip over the structured side-table."""
+def _ask_tools(query: str, structured_csv: Path, agent_provider: str) -> int:
+    """Run a tool-use round-trip over the structured side-table.
+
+    ``agent_provider`` selects the tool-use backend (Gemini / Anthropic /
+    OpenAI). The four tools and the loop are provider-agnostic; only
+    the SDK encoding differs.
+    """
     if not structured_csv.exists():
         print(
             f"Structured CSV not found at {structured_csv}. "
@@ -222,9 +222,12 @@ def _ask_tools(query: str, structured_csv: Path) -> int:
         )
         return 2
 
-    print(f"Loading structured table from {structured_csv}…", file=sys.stderr)
+    print(
+        f"Loading structured table from {structured_csv}  (agent={agent_provider})…",
+        file=sys.stderr,
+    )
     con = load_applications_table(structured_csv)
-    agent = GeminiToolUseAgent(con)
+    agent = LiveToolUseAgent(con, provider=agent_provider)
     result = agent.answer(query)
 
     print(result.text)
@@ -388,6 +391,18 @@ def build_parser() -> argparse.ArgumentParser:
             "default. Has no effect in 'tools' mode (no retrieval)."
         ),
     )
+    p_ask.add_argument(
+        "--agent-provider",
+        choices=AGENT_PROVIDER_NAMES,
+        default=DEFAULT_AGENT_PROVIDER,
+        help=(
+            f"Provider for the tool-use agent and the router (default "
+            f"{DEFAULT_AGENT_PROVIDER!r}). Decoupled from --provider so "
+            f"you can pair a cheap fast model for routing/tools with a "
+            f"higher-quality model for RAG/compose. Only used by "
+            f"'--mode tools' and '--mode auto'."
+        ),
+    )
 
     p_eval = sub.add_parser(
         "eval",
@@ -439,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI
         return _ingest(list(args.csvs), args.store)
     if args.command == "ask":
         if args.mode == "tools":
-            return _ask_tools(args.query, args.structured_csv)
+            return _ask_tools(args.query, args.structured_csv, args.agent_provider)
         if args.mode == "auto":
             return _ask_auto(
                 args.query,
@@ -448,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI
                 args.k,
                 args.provider,
                 args.retriever,
+                args.agent_provider,
                 expand_parents=args.expand_parents,
             )
         return _ask(

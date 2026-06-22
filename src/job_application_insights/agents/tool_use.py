@@ -1,24 +1,24 @@
-"""Gemini-backed tool-use agent over the structured ``applications`` table.
+"""Provider-agnostic tool-use agent over the structured ``applications`` table.
 
-This is the Day-3 piece: the LLM finally gets to call the four typed
-Python tools from :mod:`job_application_insights.structured.tools`.
-The agent runs a small loop:
+The four typed tools from :mod:`job_application_insights.structured.tools`
+are exposed to *any* of Gemini, Anthropic, or OpenAI via the
+:class:`ToolUseSession` abstraction in :mod:`agents.backends`. The loop
+here is identical for all three providers — only the session encodes
+the SDK-specific message format.
 
-    1. Send the user's question + tool declarations to Gemini.
-    2. If Gemini returns a function_call, execute it, append the
-       result as a function_response, ask again.
-    3. If Gemini returns text, we're done — that's the answer.
-    4. Bail at ``max_steps`` so a misbehaving model can't loop forever.
+The loop:
 
-The loop itself (:func:`run_tool_use_loop`) is a free function — it
-takes a ``generate_fn`` so tests can drive it with canned Gemini
-responses without touching the network.
+    1. ``session.submit_question(question)`` → first turn.
+    2. If it's a :class:`TextTurn`, that's the final answer; stop.
+    3. If it's a :class:`ToolCallTurn`, dispatch to the matching
+       Python function, then ``session.submit_tool_result(...)`` →
+       next turn.
+    4. Repeat. Bail at ``max_steps`` to bound runaway models.
 
-The four ``FunctionDeclaration``s in :func:`build_function_declarations`
-are hand-written, not auto-derived from the Python signatures. The
-``description`` field on each is *prompt engineering* (the model reads
-it as guidance for *when* to use the tool); auto-derivation would
-produce technically correct but useless descriptions.
+Hand-written tool specs live in :func:`build_tool_specs`. Descriptions
+are *prompt engineering* — the LLM reads them to choose when to call.
+Auto-derivation from the Python signatures would technically work but
+produce useless descriptions.
 """
 
 from __future__ import annotations
@@ -27,11 +27,17 @@ from datetime import date
 from typing import Any, Literal, Protocol
 
 import duckdb
-from google import genai
-from google.genai import types as genai_types
 from pydantic import BaseModel, ConfigDict, Field
 
-from job_application_insights.generate import DEFAULT_GEMINI_MODEL
+from job_application_insights.agents.backends import (
+    AGENT_PROVIDER_NAMES,
+    StubToolUseSession,
+    TextTurn,
+    ToolCallTurn,
+    ToolSpec,
+    ToolUseSession,
+    make_tool_use_session,
+)
 from job_application_insights.structured.tools import (
     CompanyCount,
     MonthCount,
@@ -119,10 +125,9 @@ def dispatch(
         If ``name`` isn't one of the four tool names.
     """
     if name == "count_applications":
-        # Treat empty-string optionals as omitted — Gemini sometimes
-        # emits ``{"company": ""}`` for "no filter" instead of just
-        # leaving the key out. Passing ``""`` through to SQL would
-        # match nothing.
+        # Treat empty-string optionals as omitted — LLMs sometimes emit
+        # ``{"company": ""}`` for "no filter" instead of leaving the key
+        # out. Passing ``""`` through to SQL would match nothing.
         raw_company = arguments.get("company")
         company = raw_company if raw_company else None
         return count_applications(
@@ -146,7 +151,7 @@ def dispatch(
 def serialise(
     result: int | list[CompanyCount] | list[MonthCount] | list[RoleRecord],
 ) -> dict[str, Any]:
-    """Turn a tool result into the JSON-serialisable dict Gemini expects.
+    """Turn a tool result into the JSON-serialisable dict the LLM expects.
 
     Scalars wrap in ``{"value": …}``; row lists wrap in ``{"rows": [...]}``.
     The shape is intentionally uniform so the LLM sees a consistent
@@ -157,18 +162,18 @@ def serialise(
     return {"rows": [item.model_dump(mode="json") for item in result]}
 
 
-# ────────────────────────── function declarations ──────────────────────────
+# ────────────────────────── tool specs ──────────────────────────
 
 
-def build_function_declarations() -> list[genai_types.FunctionDeclaration]:
-    """The four ``FunctionDeclaration``s Gemini sees.
+def build_tool_specs() -> list[ToolSpec]:
+    """The four :class:`ToolSpec`s every provider's session translates from.
 
     Descriptions are deliberately verbose and example-laden because they
     are the only signal the model has for *when* to use each tool. Short
     descriptions led to the model picking the wrong tool in early tests.
     """
     return [
-        genai_types.FunctionDeclaration(
+        ToolSpec(
             name="count_applications",
             description=(
                 "Count the number of application acknowledgment emails, "
@@ -177,35 +182,35 @@ def build_function_declarations() -> list[genai_types.FunctionDeclaration]:
                 'in 2024?" or "How many GSK applications since March?". '
                 "Returns a single integer."
             ),
-            parameters=genai_types.Schema(
-                type=genai_types.Type.OBJECT,
-                properties={
-                    "company": genai_types.Schema(
-                        type=genai_types.Type.STRING,
-                        description=(
+            parameters={
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string",
+                        "description": (
                             "Optional company name (case-insensitive exact "
                             'match). Example: "GSK", "MediaTek", '
                             '"University of Edinburgh".'
                         ),
-                    ),
-                    "since": genai_types.Schema(
-                        type=genai_types.Type.STRING,
-                        description=(
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": (
                             "Optional inclusive lower bound on the email "
                             'date, ISO format YYYY-MM-DD. Example: "2024-01-01".'
                         ),
-                    ),
-                    "until": genai_types.Schema(
-                        type=genai_types.Type.STRING,
-                        description=(
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": (
                             "Optional inclusive upper bound on the email "
                             'date, ISO format YYYY-MM-DD. Example: "2024-12-31".'
                         ),
-                    ),
+                    },
                 },
-            ),
+            },
         ),
-        genai_types.FunctionDeclaration(
+        ToolSpec(
             name="top_companies",
             description=(
                 "Return the top-N companies by application count, "
@@ -214,17 +219,17 @@ def build_function_declarations() -> list[genai_types.FunctionDeclaration]:
                 'by application volume." Returns a list of '
                 "{company, n} rows."
             ),
-            parameters=genai_types.Schema(
-                type=genai_types.Type.OBJECT,
-                properties={
-                    "n": genai_types.Schema(
-                        type=genai_types.Type.INTEGER,
-                        description="How many companies to return. Default 10.",
-                    ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "n": {
+                        "type": "integer",
+                        "description": "How many companies to return. Default 10.",
+                    },
                 },
-            ),
+            },
         ),
-        genai_types.FunctionDeclaration(
+        ToolSpec(
             name="applications_by_month",
             description=(
                 "Return the monthly application volume time-series across "
@@ -233,9 +238,9 @@ def build_function_declarations() -> list[genai_types.FunctionDeclaration]:
                 '"Show my application volume over time." Returns a list of '
                 "{year, month, n} rows."
             ),
-            parameters=genai_types.Schema(type=genai_types.Type.OBJECT, properties={}),
+            parameters={"type": "object", "properties": {}},
         ),
-        genai_types.FunctionDeclaration(
+        ToolSpec(
             name="find_company_role",
             description=(
                 "Return the role labels (and citation handles) for every "
@@ -246,18 +251,18 @@ def build_function_declarations() -> list[genai_types.FunctionDeclaration]:
                 "label wasn't extracted from that email — surface that "
                 "honestly to the user rather than making one up."
             ),
-            parameters=genai_types.Schema(
-                type=genai_types.Type.OBJECT,
-                properties={
-                    "company": genai_types.Schema(
-                        type=genai_types.Type.STRING,
-                        description=(
+            parameters={
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string",
+                        "description": (
                             "Company name (case-insensitive exact match). " 'Example: "GSK".'
                         ),
-                    ),
+                    },
                 },
-                required=["company"],
-            ),
+                "required": ["company"],
+            },
         ),
     ]
 
@@ -265,86 +270,36 @@ def build_function_declarations() -> list[genai_types.FunctionDeclaration]:
 # ────────────────────────── the loop ──────────────────────────
 
 
-def _extract_function_call(response: Any) -> tuple[str, dict[str, Any]] | None:
-    """Pull the first function_call out of a Gemini response, or None."""
-    candidates = getattr(response, "candidates", None) or []
-    if not candidates:
-        return None
-    content = getattr(candidates[0], "content", None)
-    parts = getattr(content, "parts", None) or []
-    for part in parts:
-        fc = getattr(part, "function_call", None)
-        if fc is not None:
-            name = getattr(fc, "name", "")
-            args = getattr(fc, "args", None) or {}
-            # Gemini's args may be a MapComposite-like proxy; coerce to dict.
-            return str(name), dict(args)
-    return None
-
-
-def _extract_text(response: Any) -> str:
-    """Pull the concatenated text out of a Gemini response, empty if none."""
-    candidates = getattr(response, "candidates", None) or []
-    if not candidates:
-        return ""
-    content = getattr(candidates[0], "content", None)
-    parts = getattr(content, "parts", None) or []
-    chunks: list[str] = []
-    for part in parts:
-        text = getattr(part, "text", None)
-        if text:
-            chunks.append(text)
-    return "".join(chunks).strip()
-
-
 def run_tool_use_loop(
     question: str,
     *,
     con: duckdb.DuckDBPyConnection,
-    generate_fn: Any,
+    session: ToolUseSession,
     max_steps: int = DEFAULT_MAX_STEPS,
 ) -> ToolUseResult:
-    """Execute the tool-use loop with a stubbable ``generate_fn``.
+    """Drive a :class:`ToolUseSession` as a state machine.
 
-    ``generate_fn`` is any callable matching
-    ``(contents, config) -> response`` — production passes the real
-    Gemini ``client.models.generate_content``; tests pass a stub.
-
-    The loop is at most ``max_steps`` iterations. On hitting that ceiling
-    we stop and return whatever text we have (often empty); the
-    ``stopped_reason`` field records the cause.
+    Provider-agnostic: ``session`` can be any :class:`ToolUseSession`
+    (Gemini, Anthropic, OpenAI, or a stub). The loop dispatches each
+    :class:`ToolCallTurn` to :func:`dispatch`, serialises the result,
+    and feeds it back via ``session.submit_tool_result``.
     """
-    declarations = build_function_declarations()
-    config = genai_types.GenerateContentConfig(
-        system_instruction=SYSTEM_INSTRUCTION,
-        temperature=0.0,
-        tools=[genai_types.Tool(function_declarations=declarations)],
-    )
-
-    contents: list[Any] = [
-        genai_types.Content(
-            role="user",
-            parts=[genai_types.Part(text=question)],
-        )
-    ]
     tool_calls: list[ToolCall] = []
+    turn = session.submit_question(question)
 
     for _ in range(max_steps):
-        response = generate_fn(contents, config)
-
-        call = _extract_function_call(response)
-        if call is None:
-            text = _extract_text(response)
+        if isinstance(turn, TextTurn):
             return ToolUseResult(
                 question=question,
-                text=text,
+                text=turn.text,
                 tool_calls=tool_calls,
                 stopped_reason="final_answer",
             )
 
-        name, args = call
+        # ToolCallTurn — dispatch and continue.
+        assert isinstance(turn, ToolCallTurn)
         try:
-            raw = dispatch(con, name, args)
+            raw = dispatch(con, turn.name, turn.args)
         except ValueError as exc:
             return ToolUseResult(
                 question=question,
@@ -354,77 +309,102 @@ def run_tool_use_loop(
             )
 
         output = serialise(raw)
-        tool_calls.append(ToolCall(name=name, arguments=args, output=output))
-
-        # Echo the model's function_call back into history (Gemini
-        # requires this so it sees the call it made), then append our
-        # function_response so it can continue.
-        contents.append(
-            genai_types.Content(
-                role="model",
-                parts=[
-                    genai_types.Part(function_call=genai_types.FunctionCall(name=name, args=args))
-                ],
-            )
-        )
-        contents.append(
-            genai_types.Content(
-                role="tool",
-                parts=[
-                    genai_types.Part(
-                        function_response=genai_types.FunctionResponse(name=name, response=output)
-                    )
-                ],
-            )
-        )
+        tool_calls.append(ToolCall(name=turn.name, arguments=turn.args, output=output))
+        turn = session.submit_tool_result(turn.name, output)
 
     return ToolUseResult(
         question=question,
-        text="",
+        text=turn.text if isinstance(turn, TextTurn) else "",
         tool_calls=tool_calls,
         stopped_reason="max_steps",
     )
 
 
-# ────────────────────────── live Gemini agent ──────────────────────────
+# ────────────────────────── live agent ──────────────────────────
 
 
-class GeminiToolUseAgent:
-    """Live Gemini agent implementing :class:`ToolUseAgent`.
+class LiveToolUseAgent:
+    """Concrete :class:`ToolUseAgent` that builds a fresh session per question.
 
-    Holds a DuckDB connection, a Gemini client, and the tool-use loop
-    parameters. One agent instance can answer many questions in a row;
-    each call is a fresh conversation (no carryover state).
+    Picks the backend by provider name (``gemini`` / ``anthropic`` /
+    ``openai``). The DuckDB connection is reused across questions; the
+    session — and the conversation it tracks — is per-question.
     """
 
     def __init__(
         self,
         con: duckdb.DuckDBPyConnection,
         *,
-        model: str = DEFAULT_GEMINI_MODEL,
+        provider: str = "gemini",
+        model: str | None = None,
         api_key: str | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
     ) -> None:
+        if provider not in AGENT_PROVIDER_NAMES:
+            raise ValueError(
+                f"unknown agent provider {provider!r}; expected one of {AGENT_PROVIDER_NAMES}"
+            )
         self._con = con
+        self._provider = provider
         self._model = model
-        self._client = genai.Client(api_key=api_key)
+        self._api_key = api_key
         self._max_steps = max_steps
+        # Pre-build the tool specs once; sessions consume them per-question.
+        self._tools = build_tool_specs()
 
     def answer(self, question: str) -> ToolUseResult:
-        """Run one tool-use round-trip; return the typed result."""
         if not question.strip():
             raise ValueError("question must be non-empty")
-
-        def _generate(contents: Any, config: Any) -> Any:
-            return self._client.models.generate_content(
-                model=self._model,
-                contents=contents,
-                config=config,
-            )
-
+        session = make_tool_use_session(
+            self._provider,
+            system=SYSTEM_INSTRUCTION,
+            tools=self._tools,
+            model=self._model,
+            api_key=self._api_key,
+        )
         return run_tool_use_loop(
             question,
             con=self._con,
-            generate_fn=_generate,
+            session=session,
             max_steps=self._max_steps,
         )
+
+
+# Backwards-compatible alias — kept so external scripts that import the
+# old name don't break. The default ``provider="gemini"`` preserves the
+# Day 3 behaviour.
+class GeminiToolUseAgent(LiveToolUseAgent):
+    """Tool-use agent locked to Gemini (kept for backwards compatibility)."""
+
+    def __init__(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        *,
+        model: str | None = None,
+        api_key: str | None = None,
+        max_steps: int = DEFAULT_MAX_STEPS,
+    ) -> None:
+        super().__init__(
+            con,
+            provider="gemini",
+            model=model,
+            api_key=api_key,
+            max_steps=max_steps,
+        )
+
+
+__all__ = [
+    "DEFAULT_MAX_STEPS",
+    "SYSTEM_INSTRUCTION",
+    "TOOL_NAMES",
+    "GeminiToolUseAgent",
+    "LiveToolUseAgent",
+    "StubToolUseSession",
+    "ToolCall",
+    "ToolUseAgent",
+    "ToolUseResult",
+    "build_tool_specs",
+    "dispatch",
+    "run_tool_use_loop",
+    "serialise",
+]

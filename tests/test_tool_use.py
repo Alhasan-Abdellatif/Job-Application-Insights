@@ -1,27 +1,31 @@
-"""Tests for the Gemini tool-use agent over the structured table.
+"""Tests for the provider-agnostic tool-use agent (agents/tool_use.py).
 
 Three layers, each tested independently:
 
 * :func:`dispatch` — pure: name + args → tool result.
 * :func:`serialise` — pure: tool result → JSON-able dict.
-* :func:`run_tool_use_loop` — the loop, driven by a ``generate_fn``
-  stub that returns canned Gemini responses. No network.
+* :func:`run_tool_use_loop` — the loop, driven by a stub
+  :class:`ToolUseSession`. No network, no SDK imports in tests.
 
-The live :class:`GeminiToolUseAgent` is exercised separately via a
-smoke test against the real API (run by hand, not in CI).
+The three live backends (Gemini / Anthropic / OpenAI) share this loop
+code; only the SDK-specific session encoding differs. Each live backend
+is exercised by manual smoke tests, not in this unit-test file.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
 
 import duckdb
 import pytest
+from job_application_insights.agents.backends import (
+    StubToolUseSession,
+    TextTurn,
+    ToolCallTurn,
+)
 from job_application_insights.agents.tool_use import (
     ToolUseResult,
-    build_function_declarations,
+    build_tool_specs,
     dispatch,
     run_tool_use_loop,
     serialise,
@@ -72,7 +76,7 @@ def test_dispatch_count_coerces_date_strings(con: duckdb.DuckDBPyConnection) -> 
 
 
 def test_dispatch_count_treats_empty_string_as_none(con: duckdb.DuckDBPyConnection) -> None:
-    """Some Gemini setups send empty-string for omitted optional params."""
+    """Some LLMs send empty-string for omitted optional params."""
     assert dispatch(con, "count_applications", {"company": "", "since": ""}) == 5
 
 
@@ -130,12 +134,12 @@ def test_serialise_empty_list() -> None:
     assert serialise([]) == {"rows": []}
 
 
-# ────────────────────────── function declarations ──────────────────────────
+# ────────────────────────── tool specs ──────────────────────────
 
 
-def test_function_declarations_cover_all_four_tools() -> None:
-    decls = build_function_declarations()
-    names = {d.name for d in decls}
+def test_tool_specs_cover_all_four_tools() -> None:
+    specs = build_tool_specs()
+    names = {s.name for s in specs}
     assert names == {
         "count_applications",
         "top_companies",
@@ -144,96 +148,51 @@ def test_function_declarations_cover_all_four_tools() -> None:
     }
 
 
-def test_function_declarations_have_descriptions() -> None:
+def test_tool_specs_have_descriptions() -> None:
     """Descriptions are prompt-engineering — empty ones are a regression."""
-    for d in build_function_declarations():
-        assert d.description and len(d.description) > 40
+    for s in build_tool_specs():
+        assert s.description and len(s.description) > 40
 
 
 def test_find_company_role_requires_company() -> None:
     """The schema must mark `company` as required."""
-    decls = {d.name: d for d in build_function_declarations()}
-    decl = decls["find_company_role"]
-    assert decl.parameters is not None
-    assert decl.parameters.required == ["company"]
+    specs = {s.name: s for s in build_tool_specs()}
+    spec = specs["find_company_role"]
+    assert spec.parameters.get("required") == ["company"]
 
 
-# ────────────────────────── the loop (stubbed Gemini) ──────────────────────────
+def test_tool_specs_parameters_are_json_schema_dicts() -> None:
+    """All providers' SDKs accept JSON-schema dicts — make sure we emit them."""
+    for s in build_tool_specs():
+        params = s.parameters
+        assert params["type"] == "object"
+        assert "properties" in params
 
 
-def _text_response(text: str) -> Any:
-    """Build a stub Gemini response that contains only text."""
-    return SimpleNamespace(
-        candidates=[
-            SimpleNamespace(
-                content=SimpleNamespace(
-                    parts=[SimpleNamespace(text=text, function_call=None)],
-                )
-            )
-        ]
-    )
-
-
-def _call_response(name: str, args: dict[str, Any]) -> Any:
-    """Build a stub Gemini response that contains one function_call."""
-    return SimpleNamespace(
-        candidates=[
-            SimpleNamespace(
-                content=SimpleNamespace(
-                    parts=[
-                        SimpleNamespace(
-                            text=None,
-                            function_call=SimpleNamespace(name=name, args=args),
-                        )
-                    ],
-                )
-            )
-        ]
-    )
-
-
-def _scripted_generate(responses: list[Any]) -> Any:
-    """Return a generate_fn that yields the next canned response per call."""
-    state = {"i": 0}
-    contents_seen: list[Any] = []
-    configs_seen: list[Any] = []
-
-    def _fn(contents: Any, config: Any) -> Any:
-        contents_seen.append(contents)
-        configs_seen.append(config)
-        i = state["i"]
-        state["i"] = i + 1
-        if i >= len(responses):
-            raise AssertionError(f"generate_fn called {i + 1} times; only {len(responses)} canned")
-        return responses[i]
-
-    _fn.contents_seen = contents_seen  # type: ignore[attr-defined]
-    _fn.configs_seen = configs_seen  # type: ignore[attr-defined]
-    _fn.state = state  # type: ignore[attr-defined]
-    return _fn
+# ────────────────────────── the loop (StubToolUseSession) ──────────────────────────
 
 
 def test_loop_returns_immediately_on_text_response(
     con: duckdb.DuckDBPyConnection,
 ) -> None:
-    """If Gemini returns text on the first call, we don't call any tool."""
-    gen = _scripted_generate([_text_response("Hi, I have no tools to call.")])
-    result = run_tool_use_loop("hello", con=con, generate_fn=gen)
+    """If the session returns text on the first turn, no tool runs."""
+    session = StubToolUseSession([TextTurn(text="Hi, no tools needed.")])
+    result = run_tool_use_loop("hello", con=con, session=session)
     assert isinstance(result, ToolUseResult)
-    assert result.text == "Hi, I have no tools to call."
+    assert result.text == "Hi, no tools needed."
     assert result.tool_calls == []
     assert result.stopped_reason == "final_answer"
 
 
 def test_loop_executes_one_tool_then_text(con: duckdb.DuckDBPyConnection) -> None:
-    """Classic: function_call → execute → function_response → final text."""
-    gen = _scripted_generate(
+    """Classic: tool_call → execute → tool_result → final text."""
+    session = StubToolUseSession(
         [
-            _call_response("count_applications", {"company": "Gsk"}),
-            _text_response("You sent 3 applications to GSK."),
+            ToolCallTurn(name="count_applications", args={"company": "Gsk"}),
+            TextTurn(text="You sent 3 applications to GSK."),
         ]
     )
-    result = run_tool_use_loop("How many GSK applications?", con=con, generate_fn=gen)
+    result = run_tool_use_loop("How many GSK applications?", con=con, session=session)
     assert result.text == "You sent 3 applications to GSK."
     assert result.stopped_reason == "final_answer"
     assert len(result.tool_calls) == 1
@@ -245,14 +204,14 @@ def test_loop_executes_one_tool_then_text(con: duckdb.DuckDBPyConnection) -> Non
 
 def test_loop_chains_two_tools(con: duckdb.DuckDBPyConnection) -> None:
     """Two tool calls in sequence — checks the loop continues correctly."""
-    gen = _scripted_generate(
+    session = StubToolUseSession(
         [
-            _call_response("count_applications", {}),
-            _call_response("top_companies", {"n": 2}),
-            _text_response("You sent 5 total. Top: Gsk (3), Edinburgh (1)."),
+            ToolCallTurn(name="count_applications", args={}),
+            ToolCallTurn(name="top_companies", args={"n": 2}),
+            TextTurn(text="You sent 5 total. Top: Gsk (3), Edinburgh (1)."),
         ]
     )
-    result = run_tool_use_loop("Summarise my applications", con=con, generate_fn=gen)
+    result = run_tool_use_loop("Summarise my applications", con=con, session=session)
     assert result.stopped_reason == "final_answer"
     assert [tc.name for tc in result.tool_calls] == [
         "count_applications",
@@ -261,17 +220,19 @@ def test_loop_chains_two_tools(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def test_loop_hits_max_steps_when_model_loops(con: duckdb.DuckDBPyConnection) -> None:
-    """A misbehaving model that only ever emits function calls is bounded."""
-    gen = _scripted_generate([_call_response("count_applications", {}) for _ in range(10)])
-    result = run_tool_use_loop("loop forever", con=con, generate_fn=gen, max_steps=3)
+    """A misbehaving model that only ever emits tool calls is bounded."""
+    session = StubToolUseSession(
+        [ToolCallTurn(name="count_applications", args={}) for _ in range(10)]
+    )
+    result = run_tool_use_loop("loop forever", con=con, session=session, max_steps=3)
     assert result.stopped_reason == "max_steps"
     assert len(result.tool_calls) == 3  # exactly the cap
 
 
 def test_loop_unknown_tool_short_circuits(con: duckdb.DuckDBPyConnection) -> None:
     """The model invents a tool we don't have → stop with an error message."""
-    gen = _scripted_generate([_call_response("nonexistent_tool", {})])
-    result = run_tool_use_loop("trick the agent", con=con, generate_fn=gen)
+    session = StubToolUseSession([ToolCallTurn(name="nonexistent_tool", args={})])
+    result = run_tool_use_loop("trick the agent", con=con, session=session)
     assert result.stopped_reason == "unknown_tool"
     assert "unknown tool" in result.text.lower()
     assert result.tool_calls == []
@@ -279,25 +240,29 @@ def test_loop_unknown_tool_short_circuits(con: duckdb.DuckDBPyConnection) -> Non
 
 def test_loop_records_serialised_output(con: duckdb.DuckDBPyConnection) -> None:
     """`tool_calls[].output` is the JSON-shaped dict, not raw model objects."""
-    gen = _scripted_generate(
+    session = StubToolUseSession(
         [
-            _call_response("top_companies", {"n": 1}),
-            _text_response("Top company: Gsk."),
+            ToolCallTurn(name="top_companies", args={"n": 1}),
+            TextTurn(text="Top company: Gsk."),
         ]
     )
-    result = run_tool_use_loop("top one?", con=con, generate_fn=gen)
+    result = run_tool_use_loop("top one?", con=con, session=session)
     assert result.tool_calls[0].output == {"rows": [{"company": "Gsk", "n": 3}]}
 
 
-def test_loop_passes_tools_in_config(con: duckdb.DuckDBPyConnection) -> None:
-    """The config sent to Gemini must include the four tool declarations."""
-    gen = _scripted_generate([_text_response("ok")])
-    run_tool_use_loop("noop", con=con, generate_fn=gen)
-    config = gen.configs_seen[0]
-    decls = config.tools[0].function_declarations
-    assert {d.name for d in decls} == {
-        "count_applications",
-        "top_companies",
-        "applications_by_month",
-        "find_company_role",
-    }
+def test_loop_session_records_question_and_results(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    """The session sees the right inputs: the question first, then the tool result."""
+    session = StubToolUseSession(
+        [
+            ToolCallTurn(name="count_applications", args={}),
+            TextTurn(text="ok"),
+        ]
+    )
+    run_tool_use_loop("question text", con=con, session=session)
+    assert session.questions_seen == ["question text"]
+    assert len(session.tool_results_seen) == 1
+    name, result = session.tool_results_seen[0]
+    assert name == "count_applications"
+    assert result == {"value": 5}

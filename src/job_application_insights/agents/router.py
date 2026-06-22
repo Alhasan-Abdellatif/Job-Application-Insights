@@ -1,6 +1,6 @@
 """Question router: classify each question by which engine should answer.
 
-One small Gemini call, JSON-structured output, three buckets:
+One small LLM call, JSON-structured output, three buckets:
 
 * ``rag`` — the answer lives in the text of some email. Use the Week 2
   retrieve+generate path.
@@ -10,10 +10,16 @@ One small Gemini call, JSON-structured output, three buckets:
   into a ``structured_question`` and a ``rag_question``; the
   orchestrator will run each engine on its sub-question and compose.
 
+Provider-agnostic: the router takes any :class:`LLMClient` (Gemini,
+Anthropic, OpenAI) and asks it to return JSON. Each provider follows
+the JSON-only instruction well enough at temperature 0; for Gemini we
+could additionally set ``response_mime_type="application/json"`` but
+keep the surface uniform here for portability.
+
 Conservative fallback: anything that *isn't* clean parseable JSON
 matching :class:`RouterDecision` becomes ``mode="rag"``. RAG is the
-safe default because it always produces *some* answer (even if "I
-don't know"); a wrong tool route can silently return 0.
+safe default because it always produces *some* answer (even "I don't
+know"); a wrong tool route can silently return 0.
 """
 
 from __future__ import annotations
@@ -21,8 +27,9 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from google.genai import types as genai_types
 from pydantic import BaseModel, ConfigDict, ValidationError
+
+from job_application_insights.generate import LLMClient
 
 ROUTER_SYSTEM_INSTRUCTION: str = (
     "You are a question router for a job-application RAG system that has "
@@ -76,21 +83,6 @@ class RouterDecision(BaseModel):
             raise ValueError(f"mode={self.mode!r} must not carry sub-questions")
 
 
-def _extract_text(response: Any) -> str:
-    """Pull concatenated text out of a Gemini response — empty on misses."""
-    candidates = getattr(response, "candidates", None) or []
-    if not candidates:
-        return ""
-    content = getattr(candidates[0], "content", None)
-    parts = getattr(content, "parts", None) or []
-    chunks: list[str] = []
-    for part in parts:
-        text = getattr(part, "text", None)
-        if text:
-            chunks.append(text)
-    return "".join(chunks).strip()
-
-
 def _parse_router_json(raw: str) -> RouterDecision | None:
     """Best-effort: strip ```json fences, parse, validate.
 
@@ -116,32 +108,25 @@ def _parse_router_json(raw: str) -> RouterDecision | None:
         return None
 
 
-def classify(question: str, *, generate_fn: Any) -> RouterDecision:
+def classify(question: str, *, llm_client: LLMClient) -> RouterDecision:
     """Classify a question into one of the three router buckets.
 
-    ``generate_fn`` is the same callable shape as the tool-use loop:
-    ``(contents, config) -> response``. Tests pass a stub; production
-    passes the real ``client.models.generate_content`` wrapped.
+    ``llm_client`` is any :class:`LLMClient` implementation — Gemini,
+    Anthropic, OpenAI, or a test stub. The classifier issues one
+    ``complete()`` call at ``temperature=0`` and parses the output as
+    JSON.
 
-    Conservative fallback: any failure to parse a valid RouterDecision
-    becomes ``RouterDecision(mode="rag")``.
+    Conservative fallback: any failure to parse a valid
+    :class:`RouterDecision` becomes ``RouterDecision(mode="rag")``.
     """
     if not question.strip():
         raise ValueError("question must be non-empty")
 
-    config = genai_types.GenerateContentConfig(
-        system_instruction=ROUTER_SYSTEM_INSTRUCTION,
+    raw = llm_client.complete(
+        system=ROUTER_SYSTEM_INSTRUCTION,
+        user=question,
         temperature=0.0,
-        response_mime_type="application/json",
     )
-    contents = [
-        genai_types.Content(
-            role="user",
-            parts=[genai_types.Part(text=question)],
-        )
-    ]
-    response = generate_fn(contents, config)
-    raw = _extract_text(response)
     decision = _parse_router_json(raw)
     if decision is None:
         return RouterDecision(mode="rag")

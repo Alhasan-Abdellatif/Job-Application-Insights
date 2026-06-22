@@ -1,14 +1,11 @@
 """Tests for the question router (agents/router.py).
 
-The classifier wraps one Gemini call and parses its JSON output. Tests
-drive it with stub responses — same SimpleNamespace shape the tool-use
-tests use, so we never need google.genai for these.
+The classifier wraps one LLMClient.complete() call and parses its JSON
+output. Tests drive it with a stub LLMClient — provider-agnostic now
+that the router doesn't import google.genai directly.
 """
 
 from __future__ import annotations
-
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from job_application_insights.agents.router import (
@@ -19,20 +16,24 @@ from job_application_insights.agents.router import (
 from pydantic import ValidationError
 
 
-def _text_response(text: str) -> Any:
-    """Build a stub Gemini response carrying only text."""
-    return SimpleNamespace(
-        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[SimpleNamespace(text=text)]))]
-    )
+class _StubLLMClient:
+    """Returns a canned text completion, records the prompts it was called with."""
 
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.calls: list[tuple[str, str]] = []
 
-def _const_generate(text: str) -> Any:
-    """Return a generate_fn that always yields the same text response."""
-
-    def _fn(_contents: Any, _config: Any) -> Any:
-        return _text_response(text)
-
-    return _fn
+    def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+    ) -> str:
+        del max_tokens, temperature
+        self.calls.append((system, user))
+        return self._text
 
 
 # ────────────────────────── RouterDecision validator ──────────────────────────
@@ -96,7 +97,7 @@ def test_parse_valid_both() -> None:
 
 
 def test_parse_strips_markdown_fence() -> None:
-    """Some Gemini setups wrap JSON in ```json … ``` despite the system prompt."""
+    """Anthropic/OpenAI sometimes wrap JSON in ```json … ``` despite the system prompt."""
     raw = '```json\n{"mode": "rag"}\n```'
     assert _parse_router_json(raw) == RouterDecision(mode="rag")
 
@@ -122,23 +123,23 @@ def test_parse_missing_subquestions_returns_none() -> None:
     assert _parse_router_json('{"mode": "both"}') is None
 
 
-# ────────────────────────── classify (live loop with stub Gemini) ──────────────────────────
+# ────────────────────────── classify with stub LLMClient ──────────────────────────
 
 
 def test_classify_returns_rag_decision() -> None:
-    gen = _const_generate('{"mode": "rag"}')
-    assert classify("Did I apply to GSK?", generate_fn=gen) == RouterDecision(mode="rag")
+    client = _StubLLMClient('{"mode": "rag"}')
+    assert classify("Did I apply to GSK?", llm_client=client) == RouterDecision(mode="rag")
 
 
 def test_classify_returns_structured_decision() -> None:
-    gen = _const_generate('{"mode": "structured"}')
-    assert classify("How many?", generate_fn=gen) == RouterDecision(mode="structured")
+    client = _StubLLMClient('{"mode": "structured"}')
+    assert classify("How many?", llm_client=client) == RouterDecision(mode="structured")
 
 
 def test_classify_returns_both_decision() -> None:
     raw = '{"mode": "both", "structured_question": "Q1", "rag_question": "Q2"}'
-    gen = _const_generate(raw)
-    out = classify("Compound", generate_fn=gen)
+    client = _StubLLMClient(raw)
+    out = classify("Compound", llm_client=client)
     assert out.mode == "both"
     assert out.structured_question == "Q1"
     assert out.rag_question == "Q2"
@@ -146,43 +147,35 @@ def test_classify_returns_both_decision() -> None:
 
 def test_classify_falls_back_to_rag_on_bad_json() -> None:
     """Conservative default — bad model output never crashes the agent."""
-    gen = _const_generate("I think this is a RAG question.")
-    assert classify("anything", generate_fn=gen) == RouterDecision(mode="rag")
+    client = _StubLLMClient("I think this is a RAG question.")
+    assert classify("anything", llm_client=client) == RouterDecision(mode="rag")
 
 
 def test_classify_falls_back_to_rag_on_invalid_schema() -> None:
-    gen = _const_generate('{"mode": "make_up_a_mode"}')
-    assert classify("anything", generate_fn=gen) == RouterDecision(mode="rag")
+    client = _StubLLMClient('{"mode": "make_up_a_mode"}')
+    assert classify("anything", llm_client=client) == RouterDecision(mode="rag")
 
 
 def test_classify_falls_back_on_empty_response() -> None:
-    """No candidates / no parts — same fallback path."""
-    empty = SimpleNamespace(candidates=[])
-
-    def _gen(_c: Any, _cfg: Any) -> Any:
-        return empty
-
-    assert classify("anything", generate_fn=_gen) == RouterDecision(mode="rag")
+    """Empty completion — same fallback path."""
+    client = _StubLLMClient("")
+    assert classify("anything", llm_client=client) == RouterDecision(mode="rag")
 
 
 def test_classify_rejects_empty_question() -> None:
-    gen = _const_generate('{"mode": "rag"}')
+    client = _StubLLMClient('{"mode": "rag"}')
     with pytest.raises(ValueError, match="non-empty"):
-        classify("   ", generate_fn=gen)
+        classify("   ", llm_client=client)
 
 
-def test_classify_passes_question_in_contents() -> None:
-    """The generate_fn must be called with the question as the user part."""
-    seen: list[Any] = []
-
-    def _gen(contents: Any, _config: Any) -> Any:
-        seen.append(contents)
-        return _text_response('{"mode": "rag"}')
-
-    classify("Tell me something", generate_fn=_gen)
-    contents = seen[0]
-    assert contents[0].role == "user"
-    assert contents[0].parts[0].text == "Tell me something"
+def test_classify_passes_question_as_user_prompt() -> None:
+    """The LLMClient must be called with the question as ``user``."""
+    client = _StubLLMClient('{"mode": "rag"}')
+    classify("Tell me something", llm_client=client)
+    assert len(client.calls) == 1
+    system, user = client.calls[0]
+    assert "router" in system.lower()
+    assert user == "Tell me something"
 
 
 def test_router_decision_is_frozen() -> None:
