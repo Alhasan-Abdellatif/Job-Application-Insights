@@ -169,21 +169,31 @@ class GeminiToolUseSession:
         content = getattr(candidates[0], "content", None) if candidates else None
         parts = getattr(content, "parts", None) or []
 
-        # First check for a function_call; Gemini won't mix text+call in
-        # the same response for our config.
+        # Find the first function_call and trim to just it (plus any
+        # preceding text parts). Gemini is more forgiving than Anthropic
+        # about dangling tool_use blocks, but the same defensive trim
+        # avoids surprises if Gemini ever emits parallel calls. Our loop
+        # dispatches one tool at a time anyway.
+        kept_parts: list[Any] = []
+        first_fc = None
         for part in parts:
             fc = getattr(part, "function_call", None)
             if fc is not None:
-                name = str(getattr(fc, "name", ""))
-                args = dict(getattr(fc, "args", None) or {})
-                # Preserve the model's call in history so the next turn
-                # has the full context.
-                if content is not None:
-                    self._contents.append(content)
-                return ToolCallTurn(name=name, args=args)
+                first_fc = fc
+                kept_parts.append(part)
+                break
+            if getattr(part, "text", None):
+                kept_parts.append(part)
 
-        text = "".join(getattr(p, "text", "") or "" for p in parts).strip()
-        return TextTurn(text=text)
+        if first_fc is None:
+            text = "".join(getattr(p, "text", "") or "" for p in parts).strip()
+            return TextTurn(text=text)
+
+        if content is not None:
+            self._contents.append(genai_types.Content(role=content.role, parts=kept_parts))
+        name = str(getattr(first_fc, "name", ""))
+        args = dict(getattr(first_fc, "args", None) or {})
+        return ToolCallTurn(name=name, args=args)
 
 
 # ────────────────────────── Anthropic backend ──────────────────────────
@@ -251,18 +261,42 @@ class AnthropicToolUseSession:
             tools=self._tools,  # type: ignore[arg-type]
             messages=self._messages,  # type: ignore[arg-type]
         )
-        # Persist the assistant's reply in history so a subsequent
-        # tool_result correlates correctly.
-        assistant_blocks = [block.model_dump() for block in response.content]
-        self._messages.append({"role": "assistant", "content": assistant_blocks})
 
+        # Anthropic *strictly* requires that every tool_use block in an
+        # assistant message has a corresponding tool_result block in the
+        # immediately-following user message. Claude often emits N tool_use
+        # blocks in parallel (e.g. asking for 2026 and 2025 counts in one
+        # turn). Our single-call loop only dispatches the first, so we'd
+        # leave the rest dangling and the next request would 400.
+        #
+        # The fix: persist ONLY the first tool_use block (with any preceding
+        # text blocks) in history. The model loses memory of having "wanted"
+        # to call the others; after seeing the first result, it'll re-emit
+        # them on the next turn if it still needs them.
+        kept_blocks: list[dict[str, Any]] = []
+        first_tool_use = None
         for block in response.content:
             if block.type == "tool_use":
-                self._last_tool_use_id = block.id
-                return ToolCallTurn(name=block.name, args=dict(block.input))
+                first_tool_use = block
+                kept_blocks.append(block.model_dump())
+                break  # stop at the first tool_use — drop the rest
+            if block.type == "text":
+                kept_blocks.append(block.model_dump())
 
-        text_parts = [getattr(b, "text", "") for b in response.content if b.type == "text"]
-        return TextTurn(text="".join(text_parts).strip())
+        if first_tool_use is None:
+            # No tool calls — keep the full assistant message and return text.
+            self._messages.append(
+                {
+                    "role": "assistant",
+                    "content": [b.model_dump() for b in response.content],
+                }
+            )
+            text_parts = [getattr(b, "text", "") for b in response.content if b.type == "text"]
+            return TextTurn(text="".join(text_parts).strip())
+
+        self._messages.append({"role": "assistant", "content": kept_blocks})
+        self._last_tool_use_id = first_tool_use.id
+        return ToolCallTurn(name=first_tool_use.name, args=dict(first_tool_use.input))
 
 
 # ────────────────────────── OpenAI backend ──────────────────────────
@@ -322,24 +356,28 @@ class OpenAIToolUseSession:
             messages=self._messages,  # type: ignore[arg-type]
         )
         msg = response.choices[0].message
-        # Persist the assistant's reply (with any tool_calls) so the
-        # next tool_result can correlate.
-        self._messages.append(msg.model_dump(exclude_none=True))
 
         if msg.tool_calls:
+            # OpenAI, like Anthropic, requires that every assistant
+            # tool_call has a matching tool response. The model may emit
+            # multiple calls in parallel; our single-call loop only
+            # dispatches the first, so we'd leave the rest dangling. Trim
+            # the persisted assistant message to ONLY the first tool_call;
+            # the model can re-emit the others on the next turn.
             call = msg.tool_calls[0]
-            # OpenAI's tool_calls union includes a "custom" variant
-            # without a .function attribute — we never declare custom
-            # tools so this branch should never fire, but the union
-            # type-narrows here for mypy.
             if getattr(call, "type", "function") != "function":
                 raise RuntimeError(f"unexpected tool_call type {call.type!r}")
+            msg_dump = msg.model_dump(exclude_none=True)
+            msg_dump["tool_calls"] = [call.model_dump(exclude_none=True)]
+            self._messages.append(msg_dump)
+
             self._last_tool_call_id = call.id
-            # mypy can't narrow the union from the type-string check
-            # above, so silence the union-attr error explicitly.
+            # mypy can't narrow the union from the runtime check above.
             args = json.loads(call.function.arguments or "{}")  # type: ignore[union-attr]
             return ToolCallTurn(name=call.function.name, args=args)  # type: ignore[union-attr]
 
+        # No tool calls — keep the full assistant message and return text.
+        self._messages.append(msg.model_dump(exclude_none=True))
         return TextTurn(text=(msg.content or "").strip())
 
 
