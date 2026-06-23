@@ -18,6 +18,7 @@ dependencies = [
     "duckdb>=1.0",
     "google-genai>=0.4",
     "langchain-text-splitters>=0.3",
+    "langgraph>=0.2",
     "numpy>=1.26",
     "openai>=1.50",
     "pandas>=3.0.3",
@@ -93,7 +94,7 @@ disallow_untyped_defs = false
 [[tool.mypy.overrides]]
 # Third-party libs without bundled type stubs — Pydantic boundary types
 # handle correctness for downstream callers.
-module = ["tiktoken", "langchain_text_splitters", "sentence_transformers", "chromadb", "google", "google.genai", "google.genai.types", "rank_bm25", "duckdb", "qdrant_client", "qdrant_client.models"]
+module = ["tiktoken", "langchain_text_splitters", "sentence_transformers", "chromadb", "google", "google.genai", "google.genai.types", "rank_bm25", "duckdb", "qdrant_client", "qdrant_client.models", "langgraph", "langgraph.graph"]
 ignore_missing_imports = true
 
 # ─────────────────────────────── Pytest ──────────────────────────────

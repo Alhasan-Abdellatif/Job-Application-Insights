@@ -20,6 +20,7 @@ from typing import Any
 
 from job_application_insights import __version__
 from job_application_insights.agents.backends import AGENT_PROVIDER_NAMES
+from job_application_insights.agents.langgraph_orchestrator import LangGraphAgent
 from job_application_insights.agents.orchestrator import AgenticAgent
 from job_application_insights.agents.router import RouterDecision, classify
 from job_application_insights.agents.tool_use import LiveToolUseAgent
@@ -59,8 +60,10 @@ DEFAULT_QDRANT_URL = "http://localhost:6333"
 DEFAULT_STORE_BACKEND = "chroma"
 DEFAULT_K = 8
 DEFAULT_AGENT_PROVIDER = "gemini"
+DEFAULT_ORCHESTRATOR = "direct"
 RETRIEVER_NAMES: tuple[str, ...] = ("dense", "bm25", "hybrid", "rerank")
 ASK_MODE_NAMES: tuple[str, ...] = ("rag", "tools", "auto")
+ORCHESTRATOR_NAMES: tuple[str, ...] = ("direct", "langgraph")
 
 
 def _ingest(
@@ -160,6 +163,7 @@ def _ask_auto(
     agent_provider: str,
     store_backend: str,
     qdrant_url: str,
+    orchestrator: str = DEFAULT_ORCHESTRATOR,
     expand_parents: bool = False,
 ) -> int:
     """Full agentic loop: router → RAG / structured / both → typed answer."""
@@ -191,7 +195,9 @@ def _ask_auto(
     def _router(question: str) -> RouterDecision:
         return classify(question, llm_client=router_client)
 
-    agent = AgenticAgent(
+    agent_cls = LangGraphAgent if orchestrator == "langgraph" else AgenticAgent
+    print(f"Orchestrator: {orchestrator}", file=sys.stderr)
+    agent = agent_cls(
         classifier=_router,
         tool_agent=LiveToolUseAgent(con, provider=agent_provider),
         retriever=retriever,
@@ -449,6 +455,18 @@ def build_parser() -> argparse.ArgumentParser:
             f"'--mode tools' and '--mode auto'."
         ),
     )
+    p_ask.add_argument(
+        "--orchestrator",
+        choices=ORCHESTRATOR_NAMES,
+        default=DEFAULT_ORCHESTRATOR,
+        help=(
+            f"Agentic-orchestrator implementation for --mode auto "
+            f"(default {DEFAULT_ORCHESTRATOR!r}). 'direct' uses the "
+            f"Week-3 if/elif dispatch. 'langgraph' uses a compiled "
+            f"StateGraph with named nodes + conditional edges. Same "
+            f"semantics; different mechanics. No effect outside auto."
+        ),
+    )
     _add_store_flags(p_ask)
 
     p_eval = sub.add_parser(
@@ -519,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI
                 args.agent_provider,
                 args.store_backend,
                 args.qdrant_url,
+                orchestrator=args.orchestrator,
                 expand_parents=args.expand_parents,
             )
         return _ask(
