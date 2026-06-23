@@ -23,6 +23,7 @@ dependencies = [
     "pandas>=3.0.3",
     "pydantic>=2.7",
     "python-dotenv>=1.0",
+    "qdrant-client>=1.10",
     "rank-bm25>=0.2.2",
     "sentence-transformers>=3.0",
     "tiktoken>=0.7",
@@ -92,7 +93,7 @@ disallow_untyped_defs = false
 [[tool.mypy.overrides]]
 # Third-party libs without bundled type stubs — Pydantic boundary types
 # handle correctness for downstream callers.
-module = ["tiktoken", "langchain_text_splitters", "sentence_transformers", "chromadb", "google", "google.genai", "google.genai.types", "rank_bm25", "duckdb"]
+module = ["tiktoken", "langchain_text_splitters", "sentence_transformers", "chromadb", "google", "google.genai", "google.genai.types", "rank_bm25", "duckdb", "qdrant_client", "qdrant_client.models"]
 ignore_missing_imports = true
 
 # ─────────────────────────────── Pytest ──────────────────────────────

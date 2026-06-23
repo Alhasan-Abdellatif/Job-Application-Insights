@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from job_application_insights import __version__
 from job_application_insights.agents.backends import AGENT_PROVIDER_NAMES
@@ -44,20 +45,31 @@ from job_application_insights.retrieval.rerank import (
     CrossEncoderReranker,
     make_reranked_retriever,
 )
-from job_application_insights.retrieval.vector_store import RetrievalResult, VectorStore
+from job_application_insights.retrieval.vector_store import (
+    STORE_BACKEND_NAMES,
+    RetrievalResult,
+    make_vector_store,
+)
 from job_application_insights.structured.table import load_applications_table
 
 DEFAULT_STORE_PATH = Path("./data/chroma")
 DEFAULT_GOLDEN_PATH = Path("./evals/golden_set.jsonl")
 DEFAULT_STRUCTURED_CSV = Path("./data/synthetic/ack_only.csv")
+DEFAULT_QDRANT_URL = "http://localhost:6333"
+DEFAULT_STORE_BACKEND = "chroma"
 DEFAULT_K = 8
 DEFAULT_AGENT_PROVIDER = "gemini"
 RETRIEVER_NAMES: tuple[str, ...] = ("dense", "bm25", "hybrid", "rerank")
 ASK_MODE_NAMES: tuple[str, ...] = ("rag", "tools", "auto")
 
 
-def _ingest(csvs: list[Path], store_path: Path) -> int:
-    """Read CSVs → chunk → embed → upsert. Idempotent."""
+def _ingest(
+    csvs: list[Path],
+    store_path: Path,
+    store_backend: str,
+    qdrant_url: str,
+) -> int:
+    """Read CSVs → chunk → embed → upsert. Idempotent across backends."""
     print(f"Loading {len(csvs)} CSV file(s)…")
     docs = load_documents([str(p) for p in csvs])
     print(f"  parsed {len(docs):,} documents")
@@ -73,8 +85,14 @@ def _ingest(csvs: list[Path], store_path: Path) -> int:
     print("Embedding chunks…")
     embeddings = embedder.embed_chunks(chunks, show_progress_bar=True)
 
-    print(f"Upserting to {store_path}…")
-    store = VectorStore(store_path)
+    destination = qdrant_url if store_backend == "qdrant" else store_path
+    print(f"Upserting to {store_backend} @ {destination}…")
+    store = make_vector_store(
+        store_backend,
+        persist_path=store_path,
+        qdrant_url=qdrant_url,
+        vector_size=embedder.dimension,
+    )
     store.upsert(chunks, embeddings)
     print(f"Done. Store now holds {store.n_chunks:,} chunks.")
     return 0
@@ -86,13 +104,15 @@ def _ask(
     k: int,
     provider: str,
     retriever_name: str,
+    store_backend: str,
+    qdrant_url: str,
     expand_parents: bool = False,
 ) -> int:
     """Retrieve top-k via the named retriever, generate a cited answer."""
-    store = VectorStore(store_path)
+    store = make_vector_store(store_backend, persist_path=store_path, qdrant_url=qdrant_url)
     if store.n_chunks == 0:
         print(
-            f"Vector store at {store_path} is empty. Run `jai ingest <csv>` first.",
+            f"Vector store ({store_backend}) is empty. Run `jai ingest <csv>` first.",
             file=sys.stderr,
         )
         return 2
@@ -138,20 +158,15 @@ def _ask_auto(
     provider: str,
     retriever_name: str,
     agent_provider: str,
+    store_backend: str,
+    qdrant_url: str,
     expand_parents: bool = False,
 ) -> int:
-    """Full agentic loop: router → RAG / structured / both → typed answer.
-
-    Loads BOTH engines up front because the router's decision is only
-    known after an LLM call. ``provider`` controls the RAG / compose
-    LLM; ``agent_provider`` controls the router + tool-use agent (these
-    are decoupled so you can pair a cheap fast model for routing with a
-    higher-quality model for compose).
-    """
-    store = VectorStore(store_path)
+    """Full agentic loop: router → RAG / structured / both → typed answer."""
+    store = make_vector_store(store_backend, persist_path=store_path, qdrant_url=qdrant_url)
     if store.n_chunks == 0:
         print(
-            f"Vector store at {store_path} is empty. Run `jai ingest <csv>` first.",
+            f"Vector store ({store_backend}) is empty. Run `jai ingest <csv>` first.",
             file=sys.stderr,
         )
         return 2
@@ -239,7 +254,7 @@ def _ask_tools(query: str, structured_csv: Path, agent_provider: str) -> int:
     return 0
 
 
-def _build_retriever(name: str, store: VectorStore) -> RetrievalFn:
+def _build_retriever(name: str, store: Any) -> RetrievalFn:
     """Construct the named retriever, paying only the cost it needs.
 
     Dense pays the BGE-small load (~5s + ~250MB RAM). BM25 pays the
@@ -276,12 +291,19 @@ def _build_retriever(name: str, store: VectorStore) -> RetrievalFn:
     raise ValueError(f"unknown retriever {name!r}; expected one of {RETRIEVER_NAMES}")
 
 
-def _eval(store_path: Path, golden_path: Path, k: int, retriever_name: str) -> int:
+def _eval(
+    store_path: Path,
+    golden_path: Path,
+    k: int,
+    retriever_name: str,
+    store_backend: str,
+    qdrant_url: str,
+) -> int:
     """Score the named retriever against the golden set."""
-    store = VectorStore(store_path)
+    store = make_vector_store(store_backend, persist_path=store_path, qdrant_url=qdrant_url)
     if store.n_chunks == 0:
         print(
-            f"Vector store at {store_path} is empty. Run `jai ingest <csv>` first.",
+            f"Vector store ({store_backend}) is empty. Run `jai ingest <csv>` first.",
             file=sys.stderr,
         )
         return 2
@@ -314,6 +336,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
 
+    def _add_store_flags(p: argparse.ArgumentParser) -> None:
+        """Common --store-backend / --qdrant-url for every subcommand."""
+        p.add_argument(
+            "--store-backend",
+            choices=STORE_BACKEND_NAMES,
+            default=DEFAULT_STORE_BACKEND,
+            help=(
+                f"Vector-store backend (default {DEFAULT_STORE_BACKEND!r}). "
+                f"'chroma' = in-process, files on disk at --store. 'qdrant' = "
+                f"out-of-process service at --qdrant-url (run via "
+                f"`docker compose up qdrant`)."
+            ),
+        )
+        p.add_argument(
+            "--qdrant-url",
+            type=str,
+            default=DEFAULT_QDRANT_URL,
+            help=(
+                f"Qdrant service URL (default {DEFAULT_QDRANT_URL}). Only "
+                f"used when --store-backend qdrant."
+            ),
+        )
+
     p_ingest = sub.add_parser("ingest", help="Index one or more email CSV exports.")
     p_ingest.add_argument(
         "csvs",
@@ -327,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_STORE_PATH,
         help=f"Where to persist the Chroma index (default {DEFAULT_STORE_PATH}).",
     )
+    _add_store_flags(p_ingest)
 
     p_ask = sub.add_parser("ask", help="Ask a natural-language question.")
     p_ask.add_argument("query", help="The question to answer.")
@@ -403,6 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"'--mode tools' and '--mode auto'."
         ),
     )
+    _add_store_flags(p_ask)
 
     p_eval = sub.add_parser(
         "eval",
@@ -437,6 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
             "BGE-reranker-base cross-encoder over the top-50 candidates)."
         ),
     )
+    _add_store_flags(p_eval)
 
     return parser
 
@@ -451,7 +499,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI
         return 0
 
     if args.command == "ingest":
-        return _ingest(list(args.csvs), args.store)
+        return _ingest(
+            list(args.csvs),
+            args.store,
+            args.store_backend,
+            args.qdrant_url,
+        )
     if args.command == "ask":
         if args.mode == "tools":
             return _ask_tools(args.query, args.structured_csv, args.agent_provider)
@@ -464,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI
                 args.provider,
                 args.retriever,
                 args.agent_provider,
+                args.store_backend,
+                args.qdrant_url,
                 expand_parents=args.expand_parents,
             )
         return _ask(
@@ -472,10 +527,19 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI
             args.k,
             args.provider,
             args.retriever,
+            args.store_backend,
+            args.qdrant_url,
             expand_parents=args.expand_parents,
         )
     if args.command == "eval":
-        return _eval(args.store, args.golden, args.k, args.retriever)
+        return _eval(
+            args.store,
+            args.golden,
+            args.k,
+            args.retriever,
+            args.store_backend,
+            args.qdrant_url,
+        )
 
     parser.print_help()
     return 0

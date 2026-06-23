@@ -180,7 +180,7 @@ class VectorStore:
         docs = data.get("documents") or []
         metas = data.get("metadatas") or []
         return [
-            _metadata_to_chunk(cid, text or "", meta or {})
+            _metadata_to_chunk(cid, text or "", dict(meta) if meta else {})
             for cid, text, meta in zip(ids, docs, metas, strict=False)
         ]
 
@@ -267,3 +267,67 @@ class VectorStore:
         ids = existing.get("ids") or []
         if ids:
             self._collection.delete(ids=ids)
+
+
+# ────────────────────────────── factory ──────────────────────────────
+
+
+STORE_BACKEND_NAMES: tuple[str, ...] = ("chroma", "qdrant")
+
+
+def make_vector_store(
+    backend: str = "chroma",
+    *,
+    persist_path: Path | str | None = None,
+    qdrant_url: str = "http://localhost:6333",
+    collection_name: str = DEFAULT_COLLECTION_NAME,
+    vector_size: int = 384,
+    qdrant_api_key: str | None = None,
+) -> Any:
+    """Construct a vector store by backend name.
+
+    Returns either a :class:`VectorStore` (Chroma) or
+    :class:`QdrantVectorStore`. Both satisfy the same shape — same
+    method names, same return types — so callers don't branch.
+
+    Parameters
+    ----------
+    backend
+        ``"chroma"`` (in-process, files on disk) or ``"qdrant"``
+        (out-of-process, HTTP service).
+    persist_path
+        Only used for ``backend="chroma"``. Defaults to
+        ``./data/chroma`` if omitted.
+    qdrant_url
+        Only used for ``backend="qdrant"``. Either an HTTP endpoint
+        or the literal ``":memory:"`` for in-process tests.
+    collection_name
+        Collection name. Defaults to ``"chunks"`` for both backends.
+    vector_size
+        Embedding dimensionality. Only Qdrant needs this up-front
+        (Chroma infers it from the first upsert). Default 384
+        matches BGE-small.
+    qdrant_api_key
+        Optional API key for hosted Qdrant Cloud.
+    """
+    if backend == "chroma":
+        return VectorStore(
+            persist_path=persist_path or Path("./data/chroma"),
+            collection_name=collection_name,
+        )
+    if backend == "qdrant":
+        # Deferred import — qdrant_store.py imports RetrievalResult from
+        # this module, so a top-level import would be circular.
+        from job_application_insights.retrieval.qdrant_store import (
+            QdrantVectorStore,
+        )
+
+        return QdrantVectorStore(
+            url=qdrant_url,
+            collection_name=collection_name,
+            vector_size=vector_size,
+            api_key=qdrant_api_key,
+        )
+    raise ValueError(
+        f"unknown vector-store backend {backend!r}; expected one of {STORE_BACKEND_NAMES}"
+    )
