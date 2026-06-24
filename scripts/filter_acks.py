@@ -44,10 +44,16 @@ def main() -> None:
         [pd.read_csv(GMAIL_DIR / csv) for csv in INBOX_CSVS],
         ignore_index=True,
     )
-    raw = raw.drop_duplicates(subset=["From", "Subject", "Body"], keep="first").reset_index(
+    # Include Date in the dedup key — many templated ACKs (Amazon, Workday-
+    # style) ship with an empty/image-only Body, so dropping Date collapses
+    # dozens of distinct applications into one row.
+    raw = raw.drop_duplicates(subset=["From", "Subject", "Date", "Body"], keep="first").reset_index(
         drop=True
     )
-    print(f"  {len(raw):,} unique (From, Subject, Body) emails across {len(INBOX_CSVS)} CSVs")
+    print(
+        f"  {len(raw):,} unique (From, Subject, Date, Body) emails "
+        f"across {len(INBOX_CSVS)} CSVs"
+    )
 
     print("Loading applications_unique.csv…")
     apps = pd.read_csv(GMAIL_DIR / APPLICATIONS_CSV)
