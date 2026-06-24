@@ -21,12 +21,10 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
-    healthcheck:
-      # Qdrant's REST health endpoint returns 200 once the index is loaded.
-      test: ["CMD-SHELL", "curl -fsS http://localhost:6333/healthz || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    # No healthcheck — Qdrant's image is distroless (no shell, no curl,
+    # no wget), so the usual `curl /healthz` approach fails inside the
+    # container. Qdrant binds the port within ~1s of starting; the API's
+    # depends_on uses `service_started` so we don't need a healthcheck.
 
   api:
     build:
@@ -35,7 +33,7 @@ services:
     container_name: jai-api
     depends_on:
       qdrant:
-        condition: service_healthy
+        condition: service_started
     environment:
       # Inside the compose network, services reach each other by name.
       JAI_STORE_BACKEND: qdrant
