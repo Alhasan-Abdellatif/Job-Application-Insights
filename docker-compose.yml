@@ -1,9 +1,13 @@
-# Week 4 production stack. Bring up individual services with:
+# Week 4 production stack. Bring up the whole thing with:
 #
-#   docker compose up qdrant          # vector DB only (Day 1)
+#   docker compose up                  # qdrant + api + ui together
+#   docker compose up qdrant           # vector DB only (day 1)
+#   docker compose up api              # api + its dep (qdrant) only
 #
-# Later in Week 4 this file grows to include the FastAPI service and
-# the Streamlit demo so `docker compose up` boots the whole stack.
+# Once running:
+#   http://localhost:6333/dashboard    # Qdrant UI
+#   http://localhost:8000/docs         # FastAPI OpenAPI explorer
+#   http://localhost:8501              # Streamlit demo
 
 services:
   qdrant:
@@ -23,6 +27,58 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jai-api
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    environment:
+      # Inside the compose network, services reach each other by name.
+      JAI_STORE_BACKEND: qdrant
+      JAI_QDRANT_URL: http://qdrant:6333
+      JAI_STRUCTURED_CSV: /app/data/synthetic/ack_only.csv
+      # API keys — read from the host shell or .env. Missing keys mean
+      # the corresponding provider just won't work; the service still
+      # starts and other providers remain usable.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 30s   # the embedder takes a few seconds to load
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jai-ui
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # In the compose network, the API service is reachable as "api".
+      # Streamlit running in the ui container hits api:8000 directly.
+      JAI_API_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    command:
+      - streamlit
+      - run
+      - streamlit_app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --browser.gatherUsageStats=false
 
 volumes:
   qdrant_storage:
