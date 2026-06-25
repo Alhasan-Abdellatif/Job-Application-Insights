@@ -201,7 +201,6 @@ scripts/
 └── curate_golden_set.py         Builds the eval golden set
 
 evals/golden_set.jsonl           Curated 11-question retrieval eval
-docs/week-{1..4}-{lesson,results}.md    Build journal — design decisions per week
 ```
 
 ---
@@ -274,19 +273,6 @@ uv run pre-commit run --all    # gate that runs all of the above
 
 Coverage hovers around 80–85% line, 70% branch. Integration tests run
 Qdrant in `:memory:` mode (no Docker required for CI).
-
----
-
-## Development journey
-
-This repo was built in five weekly iterations. Each week's `docs/week-N-lesson.md`
-captures the design decisions *before* implementation; `docs/week-N-results.md`
-is the post-mortem with what actually worked.
-
-- **Week 1** — Ingest + naive RAG (Chroma + dense retrieval + Claude RAG compose)
-- **Week 2** — Hybrid retrieval (BM25 + RRF + cross-encoder reranker) + golden-set eval harness
-- **Week 3** — Structured engine (DuckDB) + LLM tool-use + router/orchestrator
-- **Week 4** — Production wrapper: Qdrant + LangGraph + FastAPI + Streamlit + Docker + Modal
 
 ---
 

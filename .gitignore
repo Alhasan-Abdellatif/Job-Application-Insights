@@ -71,3 +71,10 @@ logs/
 .Rhistory
 .RData
 .RDataTmp
+
+# ── Private development notes (lesson docs, retrospectives) ──
+# Kept locally for the maintainer; the repo presents as a project,
+# not a tutorial.
+docs/week-*-lesson.md
+docs/week-*-results.md
+docs/week-*-lesson-results.md
