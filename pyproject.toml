@@ -36,8 +36,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.5",
-    "mypy>=1.10",
+    # Pinned to the same minor as .pre-commit-config.yaml — newer ruff
+    # versions enable extra default lints (I001 ordering tweaks, PLW0108,
+    # RUF043) that pre-commit's pinned 0.5.x doesn't flag, causing CI to
+    # fail on rules nothing locally would catch.
+    "ruff>=0.5.7,<0.6",
+    # Same idea for mypy — strict-mode error catalog grows between minors;
+    # keep CI and local checking the same set.
+    "mypy>=1.10,<1.11",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pre-commit>=3.7",
