@@ -172,11 +172,7 @@ def find_company_role(
     often itself informative (and discarding them would silently drop
     citation handles the router might want).
     """
-    sql = (
-        f"SELECT doc_id, role FROM {TABLE_NAME} "
-        f"WHERE lower(company) = lower(?) "
-        f"ORDER BY doc_id"
-    )
+    sql = f"SELECT doc_id, role FROM {TABLE_NAME} WHERE lower(company) = lower(?) ORDER BY doc_id"
     return [
         RoleRecord(doc_id=row[0], role=row[1]) for row in con.execute(sql, [company]).fetchall()
     ]

@@ -257,7 +257,7 @@ def build_tool_specs() -> list[ToolSpec]:
                     "company": {
                         "type": "string",
                         "description": (
-                            "Company name (case-insensitive exact match). " 'Example: "GSK".'
+                            'Company name (case-insensitive exact match). Example: "GSK".'
                         ),
                     },
                 },

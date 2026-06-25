@@ -66,13 +66,20 @@ ASK_MODE_NAMES: tuple[str, ...] = ("rag", "tools", "auto")
 ORCHESTRATOR_NAMES: tuple[str, ...] = ("direct", "langgraph")
 
 
-def _ingest(
+def ingest_command(
     csvs: list[Path],
-    store_path: Path,
-    store_backend: str,
-    qdrant_url: str,
+    *,
+    store_path: Path = DEFAULT_STORE_PATH,
+    store_backend: str = DEFAULT_STORE_BACKEND,
+    qdrant_url: str = DEFAULT_QDRANT_URL,
+    qdrant_path: str | None = None,
 ) -> int:
-    """Read CSVs → chunk → embed → upsert. Idempotent across backends."""
+    """Read CSVs → chunk → embed → upsert. Idempotent across backends.
+
+    Callable from Python (the Modal deployment uses it directly to populate
+    the embedded Qdrant volume on first deploy). The CLI ``ingest``
+    subcommand is a thin wrapper around this.
+    """
     print(f"Loading {len(csvs)} CSV file(s)…")
     docs = load_documents([str(p) for p in csvs])
     print(f"  parsed {len(docs):,} documents")
@@ -88,12 +95,13 @@ def _ingest(
     print("Embedding chunks…")
     embeddings = embedder.embed_chunks(chunks, show_progress_bar=True)
 
-    destination = qdrant_url if store_backend == "qdrant" else store_path
+    destination = (qdrant_path or qdrant_url) if store_backend == "qdrant" else str(store_path)
     print(f"Upserting to {store_backend} @ {destination}…")
     store = make_vector_store(
         store_backend,
         persist_path=store_path,
         qdrant_url=qdrant_url,
+        qdrant_path=qdrant_path,
         vector_size=embedder.dimension,
     )
     store.upsert(chunks, embeddings)
@@ -517,11 +525,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 — central CLI
         return 0
 
     if args.command == "ingest":
-        return _ingest(
+        return ingest_command(
             list(args.csvs),
-            args.store,
-            args.store_backend,
-            args.qdrant_url,
+            store_path=args.store,
+            store_backend=args.store_backend,
+            qdrant_url=args.qdrant_url,
         )
     if args.command == "ask":
         if args.mode == "tools":

@@ -29,6 +29,7 @@ import httpx
 import streamlit as st
 
 DEFAULT_API_URL = os.environ.get("JAI_API_URL", "http://localhost:8000")
+DEMO_MODE = os.environ.get("JAI_DEMO_MODE") == "1"
 
 MODE_HELP = {
     "rag": "Retrieve relevant email chunks and let the LLM answer from them.",
@@ -54,6 +55,15 @@ st.caption(
     "Hybrid RAG + agentic-routing demo over a job-application email corpus. "
     "Built across weeks 1-4. See [GitHub](#) for code."
 )
+
+if DEMO_MODE:
+    st.info(
+        "🧪 **Public demo** — running on **synthetic** application data "
+        "(100 templated ACKs across 15 fictional companies). No real "
+        "emails are shipped. The default LLM provider is `echo` "
+        "(deterministic, no API key); switch in the sidebar if you "
+        "want a real model response."
+    )
 
 
 # ────────────────────────── sidebar (config) ──────────────────────────
@@ -124,19 +134,33 @@ with st.sidebar:
 # ────────────────────────── main UI ──────────────────────────
 
 
-example_questions = [
-    "Did I apply to GSK?",
-    "How many applications did I send in 2025?",
-    "Top 5 companies I applied to most.",
-    "How many GSK applications and what role did I apply for?",
-]
+example_questions = (
+    [
+        "Did I apply to Aurora Robotics?",
+        "How many applications did I send in 2025?",
+        "Top 5 companies I applied to most.",
+        "What role did I apply for at Granite Robotics?",
+    ]
+    if DEMO_MODE
+    else [
+        "Did I apply to GSK?",
+        "How many applications did I send in 2025?",
+        "Top 5 companies I applied to most.",
+        "How many GSK applications and what role did I apply for?",
+    ]
+)
 with st.expander("Example questions", expanded=False):
     for q in example_questions:
         st.code(q, language="text")
 
+_default_q = (
+    "How many applications did I send to Granite Robotics?"
+    if DEMO_MODE
+    else "How many applications did I send in 2025?"
+)
 question = st.text_area(
     "Ask a question",
-    value=st.session_state.get("question", "How many applications did I send in 2025?"),
+    value=st.session_state.get("question", _default_q),
     height=80,
 )
 

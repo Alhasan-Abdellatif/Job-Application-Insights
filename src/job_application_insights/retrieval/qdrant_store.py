@@ -101,6 +101,14 @@ class QdrantVectorStore:
     url
         HTTP endpoint of the running Qdrant service, or the literal
         string ``":memory:"`` for an in-process store (used by tests).
+        Ignored if ``path`` is given.
+    path
+        If set, run an embedded file-backed Qdrant client at this
+        directory. No HTTP server, no separate container — same library,
+        same query semantics, but the index lives on the local filesystem.
+        Used by single-container deployments (Modal, HF Spaces) where
+        running a separate Qdrant process isn't worth it. Mutually
+        exclusive with ``url`` (path wins).
     collection_name
         Name of the collection. Created on first ``upsert`` if missing.
     vector_size
@@ -114,15 +122,22 @@ class QdrantVectorStore:
         self,
         url: str = DEFAULT_QDRANT_URL,
         *,
+        path: str | None = None,
         collection_name: str = DEFAULT_COLLECTION_NAME,
         vector_size: int = 384,
         api_key: str | None = None,
     ) -> None:
         self.url = url
+        self.path = path
         self.collection_name = collection_name
         self.vector_size = vector_size
 
-        if url == ":memory:":
+        if path is not None:
+            # Embedded file-backed mode — index on local disk, no HTTP
+            # server. Used by single-container deployments (Modal) where
+            # supervising a Qdrant process isn't worth it.
+            self._client = QdrantClient(path=path)
+        elif url == ":memory:":
             # In-memory mode — no server, no network. Perfect for tests.
             self._client = QdrantClient(location=":memory:")
         else:

@@ -117,8 +117,7 @@ def main() -> None:
             groups_hit = sum(1 for g in groups if g & top_k_set)
             recall = groups_hit / len(groups) if groups else 0.0
             lines.append(
-                f"### {name} — R@{K} = {recall:.3f}  "
-                f"({groups_hit}/{len(groups)} answer groups hit)"
+                f"### {name} — R@{K} = {recall:.3f}  ({groups_hit}/{len(groups)} answer groups hit)"
             )
             lines.append("")
             if not ids:

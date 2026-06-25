@@ -50,10 +50,7 @@ def main() -> None:
     raw = raw.drop_duplicates(subset=["From", "Subject", "Date", "Body"], keep="first").reset_index(
         drop=True
     )
-    print(
-        f"  {len(raw):,} unique (From, Subject, Date, Body) emails "
-        f"across {len(INBOX_CSVS)} CSVs"
-    )
+    print(f"  {len(raw):,} unique (From, Subject, Date, Body) emails across {len(INBOX_CSVS)} CSVs")
 
     print("Loading applications_unique.csv…")
     apps = pd.read_csv(GMAIL_DIR / APPLICATIONS_CSV)

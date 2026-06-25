@@ -78,6 +78,7 @@ logger = logging.getLogger(__name__)
 ENV_STORE_BACKEND = "JAI_STORE_BACKEND"
 ENV_STORE_PATH = "JAI_STORE_PATH"
 ENV_QDRANT_URL = "JAI_QDRANT_URL"
+ENV_QDRANT_PATH = "JAI_QDRANT_PATH"
 ENV_STRUCTURED_CSV = "JAI_STRUCTURED_CSV"
 
 DEFAULT_STORE_BACKEND = "chroma"
@@ -158,16 +159,22 @@ def _load_state() -> dict[str, Any]:
     store_backend = os.environ.get(ENV_STORE_BACKEND, DEFAULT_STORE_BACKEND)
     store_path = os.environ.get(ENV_STORE_PATH, DEFAULT_STORE_PATH)
     qdrant_url = os.environ.get(ENV_QDRANT_URL, DEFAULT_QDRANT_URL)
+    qdrant_path = os.environ.get(ENV_QDRANT_PATH) or None
     structured_csv = os.environ.get(ENV_STRUCTURED_CSV, DEFAULT_STRUCTURED_CSV)
 
     logger.info("Loading embedder…")
     embedder = Embedder()
 
-    logger.info("Opening vector store (%s)…", store_backend)
+    logger.info(
+        "Opening vector store (%s, %s)…",
+        store_backend,
+        f"path={qdrant_path}" if qdrant_path else f"url={qdrant_url}",
+    )
     store = make_vector_store(
         store_backend,
         persist_path=store_path,
         qdrant_url=qdrant_url,
+        qdrant_path=qdrant_path,
         vector_size=embedder.dimension,
     )
 
@@ -280,9 +287,7 @@ def _register_routes(app: FastAPI) -> None:
         if store is None or store.n_chunks == 0:
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "Vector store is empty. Run `jai ingest <csv>` before " "asking questions."
-                ),
+                detail=("Vector store is empty. Run `jai ingest <csv>` before asking questions."),
             )
 
         if req.mode in ("tools", "auto") and getattr(st, "duckdb_con", None) is None:

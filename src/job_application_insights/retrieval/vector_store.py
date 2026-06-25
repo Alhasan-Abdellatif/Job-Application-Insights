@@ -280,6 +280,7 @@ def make_vector_store(
     *,
     persist_path: Path | str | None = None,
     qdrant_url: str = "http://localhost:6333",
+    qdrant_path: str | None = None,
     collection_name: str = DEFAULT_COLLECTION_NAME,
     vector_size: int = 384,
     qdrant_api_key: str | None = None,
@@ -294,13 +295,19 @@ def make_vector_store(
     ----------
     backend
         ``"chroma"`` (in-process, files on disk) or ``"qdrant"``
-        (out-of-process, HTTP service).
+        (out-of-process HTTP service, or embedded file/memory mode).
     persist_path
         Only used for ``backend="chroma"``. Defaults to
         ``./data/chroma`` if omitted.
     qdrant_url
-        Only used for ``backend="qdrant"``. Either an HTTP endpoint
-        or the literal ``":memory:"`` for in-process tests.
+        Only used for ``backend="qdrant"`` when ``qdrant_path`` is None.
+        Either an HTTP endpoint or the literal ``":memory:"`` for
+        in-process tests.
+    qdrant_path
+        Only used for ``backend="qdrant"``. If set, runs the embedded
+        file-backed Qdrant client at this directory (no HTTP server).
+        Used by single-container deployments (Modal). Overrides
+        ``qdrant_url``.
     collection_name
         Collection name. Defaults to ``"chunks"`` for both backends.
     vector_size
@@ -324,6 +331,7 @@ def make_vector_store(
 
         return QdrantVectorStore(
             url=qdrant_url,
+            path=qdrant_path,
             collection_name=collection_name,
             vector_size=vector_size,
             api_key=qdrant_api_key,

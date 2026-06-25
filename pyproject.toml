@@ -42,6 +42,12 @@ dev = [
     "pytest-cov>=5.0",
     "pre-commit>=3.7",
 ]
+# Modal is only needed when deploying — install with
+#   uv sync --extra deploy
+# so locals and CI don't pull it (it brings in a fair amount of grpcio etc.).
+deploy = [
+    "modal>=0.64",
+]
 
 [project.scripts]
 jai = "job_application_insights.cli:main"
