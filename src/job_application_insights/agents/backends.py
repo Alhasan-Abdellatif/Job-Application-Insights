@@ -162,7 +162,11 @@ class GeminiToolUseSession:
     def _step(self) -> ToolUseTurn:
         response = self._client.models.generate_content(
             model=self._model,
-            contents=self._contents,
+            # ``contents=`` accepts a union including ``list[Content | ...]``;
+            # our concretely-typed ``list[Content]`` would widen safely in any
+            # reasonable type system, but Python's ``list`` is invariant so
+            # mypy refuses. Runtime accepts it without issue.
+            contents=self._contents,  # type: ignore[arg-type, unused-ignore]
             config=self._config,
         )
         candidates = getattr(response, "candidates", None) or []
