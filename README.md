@@ -95,6 +95,8 @@ parametrized equivalence test suite — toggle between them with
 
 ## Live demo
 
+https://alhasanabdellatif--jai-ui.modal.run/
+
 🌐 *Public demo URL coming soon (deploying on Modal)* — runs on synthetic data,
 defaults to the `echo` LLM provider (no API keys required to try the
 citation/retrieval flow).
