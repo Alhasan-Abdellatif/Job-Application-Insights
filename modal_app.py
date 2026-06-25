@@ -10,14 +10,14 @@ Three Modal primitives map our docker-compose stack onto serverless:
 * ``@modal.web_server`` — launches Streamlit as a long-running subprocess
   and proxies its port to a public URL.
 
-Deploy flow (one-time per machine)::
+Deploy flow (one-time per machine, run from the repo root)::
 
-    pip install 'job-application-insights[deploy]'
+    uv sync --extra deploy                  # or: pip install -e '.[deploy]'
     modal token new
     modal secret create jai-api-keys \\
         ANTHROPIC_API_KEY=...  OPENAI_API_KEY=...  GOOGLE_API_KEY=...
-    modal run modal_app.py::ingest      # populate the Qdrant volume
-    modal deploy modal_app.py           # ship api + ui, prints URLs
+    modal run modal_app.py::ingest          # populate the Qdrant volume
+    modal deploy modal_app.py               # ship api + ui, prints URLs
 
 After the first ingest, plain ``modal deploy`` ships code changes without
 re-ingesting — the volume persists.
