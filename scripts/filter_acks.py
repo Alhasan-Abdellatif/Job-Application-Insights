@@ -19,14 +19,18 @@ Run::
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
 
-GMAIL_DIR = Path("/Users/hasan/HASAN/docs/Gmail/Mail")
-# inbox_mail.csv covers 2020-Jul 2024 (~55k rows); the smaller snapshots
-# cover late May / early June 2026. Together they span the full window
-# Applications.ipynb analysed.
+# Where the raw Gmail CSV exports live on disk. Set ``JAI_GMAIL_DIR`` to point
+# this somewhere else without editing the script.
+GMAIL_DIR = Path(os.environ.get("JAI_GMAIL_DIR", "./data/raw/gmail"))
+
+# inbox_mail.csv covers the multi-year window; smaller snapshots are
+# fresher incremental exports. Together they span the full inbox
+# Applications.ipynb labelled.
 INBOX_CSVS = [
     "inbox_mail.csv",
     "May_inbox_6June.csv",

@@ -45,10 +45,9 @@ APP_NAME = "jai"
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install_from_pyproject("pyproject.toml")
-    .add_local_dir("src", "/app/src")
-    .add_local_file("streamlit_app.py", "/app/streamlit_app.py")
-    .add_local_file("data/synthetic/demo.csv", "/app/data/synthetic/demo.csv")
-    .add_local_file("pyproject.toml", "/app/pyproject.toml")
+    # `.workdir` and `.env` are build steps and must come BEFORE the
+    # `.add_local_*` calls — Modal rejects build steps after local-file
+    # additions (cache-invalidation safeguard).
     .workdir("/app")
     .env(
         {
@@ -64,6 +63,10 @@ image = (
             "JAI_DEMO_MODE": "1",
         }
     )
+    .add_local_dir("src", "/app/src")
+    .add_local_file("streamlit_app.py", "/app/streamlit_app.py")
+    .add_local_file("data/synthetic/demo.csv", "/app/data/synthetic/demo.csv")
+    .add_local_file("pyproject.toml", "/app/pyproject.toml")
 )
 
 # ────────────────────────── persistence + secrets ──────────────────────────
@@ -163,9 +166,13 @@ class APIService:
 @modal.web_server(port=8501, startup_timeout=120)
 def ui() -> None:
     """Run Streamlit as a long-lived subprocess; Modal proxies port 8501."""
-    # Point the UI at the API's Modal endpoint. APIService.web.web_url is
-    # resolved at runtime against the deployed app state.
-    os.environ["JAI_API_URL"] = APIService.web.web_url  # type: ignore[attr-defined]
+    # Point the UI at the API's Modal endpoint. Modal forbids accessing
+    # bound methods on the class directly — you have to instantiate it
+    # (no actual container starts here; this is just the proxy handle).
+    api_url = APIService().web.get_web_url()  # type: ignore[attr-defined]
+    if not api_url:
+        raise RuntimeError("APIService.web has no resolved web URL — is it deployed?")
+    os.environ["JAI_API_URL"] = api_url
 
     subprocess.Popen(
         [
